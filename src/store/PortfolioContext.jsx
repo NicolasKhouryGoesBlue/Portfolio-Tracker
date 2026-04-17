@@ -32,20 +32,6 @@ function uid() { return crypto.randomUUID() }
 
 // ─── Initial state ────────────────────────────────────────────────────────────
 function buildInitialState() {
-  // Wipe all Alpha Vantage cache keys on every fresh app load so a new API key
-  // is never blocked by stale cached responses from a previous key.
-  try {
-    Object.keys(localStorage)
-      .filter(k => k.startsWith('av_'))
-      .forEach(k => localStorage.removeItem(k))
-  } catch {}
-
-  // Wipe portfolio keys so the app always re-seeds from placeholder data on every load.
-  try {
-    ;['pf_positions', 'pf_watchlist', 'pf_benchmark']
-      .forEach(k => localStorage.removeItem(k))
-  } catch {}
-
   const positions = loadLS(LS_POSITIONS, null)
   const watchlist = loadLS(LS_WATCHLIST, null)
   const benchmark = loadLS(LS_BENCHMARK, null)

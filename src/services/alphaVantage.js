@@ -121,11 +121,15 @@ function isHistoryFresh(entry) {
   return !!(entry?.historyTimestamp && Date.now() - entry.historyTimestamp < CACHE_TTL_MS)
 }
 
-/** Detect Alpha Vantage rate-limit / info responses. */
+/** Detect Alpha Vantage rate-limit responses (Note key = per-minute/daily limit hit). */
 function isRateLimited(json) {
   if (!json) return false
-  const info = json.Information || json.Note || ''
-  return info.toLowerCase().includes('api') || info.toLowerCase().includes('premium')
+  if (json.Information) {
+    console.warn('[AlphaVantage] Premium feature required — downgrade request or upgrade plan:', json.Information)
+    return false
+  }
+  const note = json.Note || ''
+  return note.toLowerCase().includes('api call frequency') || note.toLowerCase().includes('thank you for using alpha vantage')
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -222,7 +226,7 @@ export async function fetchHistory(ticker, forceRefresh = false) {
     }
 
     try {
-      const url = `${API_BASE_URL}?function=TIME_SERIES_DAILY&symbol=${encodeURIComponent(ticker)}&outputsize=full&apikey=${API_KEY}`
+      const url = `${API_BASE_URL}?function=TIME_SERIES_DAILY&symbol=${encodeURIComponent(ticker)}&outputsize=compact&apikey=${API_KEY}`
       const res = await fetch(url)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json = await res.json()
