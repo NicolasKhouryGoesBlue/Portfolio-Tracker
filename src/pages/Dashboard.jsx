@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -14,10 +14,25 @@ import {
 } from '../utils/calculations'
 import { formatCurrency, formatPercent, formatGain, formatDateTime, gainClass } from '../utils/formatters'
 import TimeWindowSelector from '../components/TimeWindowSelector'
-import LoadingSpinner from '../components/LoadingSpinner'
 import { getWindowStartDate } from '../utils/timeWindows'
 import { SECTOR_COLORS } from '../config'
-import { getApiUsageStats, getQueueDepth } from '../services/alphaVantage'
+
+// ─── Period coverage helpers ──────────────────────────────────────────────────
+// periodCovers / PERIOD_ORDER are not exported from localBackend.js, so they
+// are mirrored here. DASH_PERIOD_MAP uses '1y' for YTD so the fetch covers the
+// full calendar year regardless of where Jan 1 falls.
+const DASH_PERIOD_MAP = {
+  '1D': '1d', '1W': '5d', 'MTD': '1mo', '1M': '1mo',
+  '3M': '3mo', '6M': '6mo', 'YTD': '1y', '1Y': '1y', '5Y': '5y', 'MAX': 'max',
+}
+const DASH_PERIOD_ORDER = ['1d', '5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5y', '10y', 'max']
+function periodCoversLocal(cachedPeriod, requestedPeriod) {
+  if (!cachedPeriod) return false
+  const ci = DASH_PERIOD_ORDER.indexOf(cachedPeriod)
+  const ri = DASH_PERIOD_ORDER.indexOf(requestedPeriod)
+  if (ci === -1 || ri === -1) return false
+  return ci >= ri
+}
 
 // ─── Recharts tooltip ────────────────────────────────────────────────────────
 function ChartTooltip({ active, payload, label }) {
@@ -58,8 +73,6 @@ export default function Dashboard() {
   const { state, actions } = usePortfolio()
   const navigate = useNavigate()
   const [window, setWindow] = useState('1Y')
-  const [refreshing, setRefreshing] = useState(false)
-  const [showRefreshWarning, setShowRefreshWarning] = useState(false)
 
   const summary = useMemo(
     () => calcPortfolioSummary(state.positions, state.priceCache),
@@ -97,34 +110,48 @@ export default function Dashboard() {
 
   const hasChartData = chartData.length >= 2
 
-  // Fix 2 — trigger lazy history fetch once on mount
+  // Fetch 1y history once on mount
   useEffect(() => {
     actions.fetchHistoryForPositions(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // When the user switches to a longer time window, fetch more history if the
+  // cached period doesn't already cover it. Skips on the initial render so the
+  // mount effect above handles the first fetch without doubling up.
+  const isFirstWindowRender = useRef(true)
+  useEffect(() => {
+    if (isFirstWindowRender.current) {
+      isFirstWindowRender.current = false
+      return
+    }
+    const period = DASH_PERIOD_MAP[window] ?? '1y'
+    const needsFetch = state.positions.some(
+      p => !periodCoversLocal(state.priceCache[p.ticker]?.historyPeriod ?? null, period)
+    )
+    if (needsFetch) {
+      actions.fetchHistoryForPositions(false, period)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [window])
+
   // Derive history loading / failed state from context
   const historyLoading = (state.historyLoadingTickers?.size ?? 0) > 0
   const historyFailed  = state.historyFailed ?? false
 
-  // Oldest historyTimestamp across all positions — tells user how fresh the chart data is
-  const historyTimestamp = useMemo(() => {
-    const ts = state.positions
-      .map(p => state.priceCache[p.ticker]?.historyTimestamp ?? 0)
-      .filter(t => t > 0)
-    return ts.length > 0 ? Math.min(...ts) : null
-  }, [state.positions, state.priceCache])
+  // Auto-refresh prices every 60 seconds
+  useEffect(() => {
+    const id = setInterval(() => actions.refreshPrices(true), 60_000)
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-  // API usage stats — read from localStorage on every render (cheap sync read)
-  const apiUsage   = getApiUsageStats()
-  const queueActive = getQueueDepth() > 0 || state.isRefreshing || historyLoading
-
-  async function handleRefresh() {
-    setShowRefreshWarning(false)
-    setRefreshing(true)
-    await actions.refreshPrices(true)
-    setRefreshing(false)
-  }
+  // Live clock — updated every 60 seconds to match the auto-refresh cadence
+  const [now, setNow] = useState(new Date())
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 60_000)
+    return () => clearInterval(id)
+  }, [])
 
   const totalGainClass = gainClass(summary.totalReturn)
   const hasPositions = state.positions.length > 0
@@ -142,40 +169,8 @@ export default function Dashboard() {
       {/* ── Page header ─────────────────────────────────────────────────────── */}
       <div className="page-header">
         <h1 className="page-title">Dashboard</h1>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {state.lastUpdated && (
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-              Updated {formatDateTime(state.lastUpdated)}
-            </span>
-          )}
-          {state.isRefreshing || refreshing ? (
-            <LoadingSpinner label="Refreshing…" />
-          ) : (
-            <>
-              {showRefreshWarning ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 12, color: 'var(--yellow)' }}>Uses API quota (25/day)</span>
-                  <button className="btn btn-sm btn-primary" onClick={handleRefresh}>Confirm</button>
-                  <button className="btn btn-sm btn-ghost" onClick={() => setShowRefreshWarning(false)}>Cancel</button>
-                </div>
-              ) : (
-                <button className="btn btn-ghost btn-sm" onClick={() => setShowRefreshWarning(true)}>
-                  ↻ Refresh Prices
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* ── Fix 5 — API usage status ────────────────────────────────────────── */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: -16, marginBottom: 20 }}>
-        <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-          API usage: {apiUsage.callsToday}/25 calls today
-          {' · '}resets in {apiUsage.timeUntilReset}
-          {queueActive && (
-            <span style={{ color: 'var(--yellow)', marginLeft: 6 }}>· queuing requests…</span>
-          )}
+        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          Last updated: {formatDateTime(now)}
         </span>
       </div>
 
@@ -246,15 +241,6 @@ export default function Dashboard() {
                 />
               </LineChart>
             </ResponsiveContainer>
-            {/* Fix 4 — cache timestamp label */}
-            {historyTimestamp && (
-              <div style={{ textAlign: 'right', fontSize: 11, color: 'var(--text-dim)', marginTop: 6 }}>
-                Price history last updated:{' '}
-                {new Date(historyTimestamp).toLocaleString('en-US', {
-                  month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
-                })}
-              </div>
-            )}
           </>
 
         ) : historyLoading ? (
@@ -268,24 +254,19 @@ export default function Dashboard() {
           </div>
 
         ) : historyFailed ? (
-          /* Fix 3 — fetch failed / rate limited */
           <div style={{ padding: '28px 0', textAlign: 'center', fontSize: 13 }}>
             <div style={{ fontSize: 20, marginBottom: 8 }}>⚠</div>
             <p style={{ color: 'var(--yellow)', fontWeight: 600 }}>
-              Historical data unavailable — Alpha Vantage rate limit reached.
+              Historical data unavailable.
             </p>
             <p style={{ color: 'var(--text-muted)', marginTop: 4, fontSize: 12 }}>
-              Cached data will be used when available. Try again after the daily quota resets.
+              Cached data will be used when available. Refresh to retry.
             </p>
           </div>
 
         ) : (
-          /* Fix 3 — no data at all yet */
           <div style={{ padding: '28px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-            <p>No historical data yet.</p>
-            <p style={{ fontSize: 12, marginTop: 4, color: 'var(--text-dim)' }}>
-              Data will load automatically within the API rate limit window.
-            </p>
+            <p>Loading historical data...</p>
           </div>
         )}
       </div>

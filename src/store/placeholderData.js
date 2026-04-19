@@ -14,7 +14,7 @@ export const PLACEHOLDER_POSITIONS = [
     companyName: 'Apple Inc.',
     sector: 'Technology',
     lots: [
-      { id: id(), date: '2022-06-15', shares: 20, pricePerShare: 135.87 },
+      { id: id(), date: '2021-04-18', shares: 20, pricePerShare: 135.87 },
       { id: id(), date: '2023-11-10', shares: 15, pricePerShare: 182.41 },
     ],
     dividends: [
@@ -22,6 +22,28 @@ export const PLACEHOLDER_POSITIONS = [
       { id: id(), date: '2024-08-15', amount: 14.60 },
     ],
     notes: 'Core holding. Strong services growth, tight ecosystem lock-in. Will add on dips.',
+  },
+  {
+    id: id(),
+    ticker: 'GOOGL',
+    companyName: 'Alphabet Inc.',
+    sector: 'Technology',
+    lots: [
+      { id: id(), date: '2016-03-16', shares: 100, pricePerShare: 37.50 },
+    ],
+    dividends: [],
+    notes: '',
+  },
+  {
+    id: id(),
+    ticker: 'MSFT',
+    companyName: 'Microsoft Corporation',
+    sector: 'Technology',
+    lots: [
+      { id: id(), date: '2023-03-16', shares: 10, pricePerShare: 270.50 },
+    ],
+    dividends: [],
+    notes: '',
   },
 ]
 

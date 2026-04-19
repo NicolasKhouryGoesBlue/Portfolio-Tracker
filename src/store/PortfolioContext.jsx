@@ -6,7 +6,7 @@ import {
   getCachedEntry,
   seedCacheEntry,
   getLastUpdatedTimestamp,
-} from '../services/alphaVantage'
+} from '../services/localBackend'
 import {
   PLACEHOLDER_POSITIONS,
   PLACEHOLDER_WATCHLIST,
@@ -69,6 +69,7 @@ function buildPriceCacheFromLS() {
       cache[ticker] = {
         quote:            entry.quote            ?? null,
         history:          entry.history          ?? null,
+        historyPeriod:    entry.historyPeriod    ?? null,
         timestamp:        entry.timestamp        ?? 0,
         historyTimestamp: entry.historyTimestamp ?? 0,
       }
@@ -201,9 +202,10 @@ function reducer(state, action) {
       const priceCache = {
         ...state.priceCache,
         [action.ticker]: {
-          quote:            action.quote            ?? prev.quote    ?? null,
-          history:          action.history          ?? prev.history  ?? null,
-          timestamp:        action.timestamp        ?? prev.timestamp ?? Date.now(),
+          quote:            action.quote            ?? prev.quote           ?? null,
+          history:          action.history          ?? prev.history         ?? null,
+          historyPeriod:    action.historyPeriod    ?? prev.historyPeriod   ?? null,
+          timestamp:        action.timestamp        ?? prev.timestamp       ?? Date.now(),
           historyTimestamp: action.historyTimestamp ?? prev.historyTimestamp ?? 0,
         },
       }
@@ -295,11 +297,12 @@ export function PortfolioProvider({ children }) {
         if (result.stale)       anyStale       = true
 
         dispatch({
-          type:             'SET_TICKER_DATA',
+          type:          'SET_TICKER_DATA',
           ticker,
-          quote:            result.quote,
-          history:          result.history ?? undefined,  // preserve existing when quotes-only
-          timestamp:        Date.now(),
+          quote:         result.quote,
+          history:       result.history       ?? undefined,  // preserve existing when quotes-only
+          historyPeriod: result.period        ?? undefined,
+          timestamp:     Date.now(),
         })
       } catch (e) {
         console.warn(`Failed to fetch ${ticker}:`, e)
@@ -328,7 +331,7 @@ export function PortfolioProvider({ children }) {
   // ── Lazy history fetch — called by Dashboard and MyStockDetail on mount ───
   const historyFetchingRef = useRef(false)
 
-  const fetchHistoryForPositions = useCallback(async (force = false) => {
+  const fetchHistoryForPositions = useCallback(async (force = false, period = '1y') => {
     if (historyFetchingRef.current) return
     historyFetchingRef.current = true
     dispatch({ type: 'SET_HISTORY_FAILED', value: false })
@@ -339,14 +342,15 @@ export function PortfolioProvider({ children }) {
     for (const ticker of tickers) {
       dispatch({ type: 'SET_HISTORY_LOADING_TICKER', ticker, loading: true })
       try {
-        const result = await fetchHistory(ticker, force)
+        const result = await fetchHistory(ticker, force, period)
         if (result.rateLimited || result.stale) anyFailed = true
-        // Dispatch only the history field so quote/timestamp are preserved
+        // Dispatch only the history fields so quote/timestamp are preserved
         const cached = getCachedEntry(ticker)
         dispatch({
           type:             'SET_TICKER_DATA',
           ticker,
           history:          result.history,
+          historyPeriod:    result.period ?? undefined,
           historyTimestamp: result.fromCache && !force
             ? (cached?.historyTimestamp ?? Date.now())
             : Date.now(),
@@ -363,15 +367,16 @@ export function PortfolioProvider({ children }) {
     historyFetchingRef.current = false
   }, [state.positions])
 
-  const fetchHistoryForTicker = useCallback(async (ticker, force = false) => {
+  const fetchHistoryForTicker = useCallback(async (ticker, force = false, period = '1y') => {
     dispatch({ type: 'SET_HISTORY_LOADING_TICKER', ticker, loading: true })
     try {
-      const result = await fetchHistory(ticker, force)
+      const result = await fetchHistory(ticker, force, period)
       const cached = getCachedEntry(ticker)
       dispatch({
         type:             'SET_TICKER_DATA',
         ticker,
         history:          result.history,
+        historyPeriod:    result.period ?? undefined,
         historyTimestamp: result.fromCache && !force
           ? (cached?.historyTimestamp ?? Date.now())
           : Date.now(),
@@ -468,12 +473,12 @@ export function PortfolioProvider({ children }) {
       return refreshPrices(force)
     },
 
-    fetchHistoryForPositions(force = false) {
-      return fetchHistoryForPositions(force)
+    fetchHistoryForPositions(force = false, period = '1y') {
+      return fetchHistoryForPositions(force, period)
     },
 
-    fetchHistoryForTicker(ticker, force = false) {
-      return fetchHistoryForTicker(ticker, force)
+    fetchHistoryForTicker(ticker, force = false, period = '1y') {
+      return fetchHistoryForTicker(ticker, force, period)
     },
   }
 

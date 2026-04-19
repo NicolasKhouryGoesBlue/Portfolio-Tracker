@@ -14,6 +14,7 @@ import AddPositionModal from '../components/AddPositionModal'
 import LoadingSpinner from '../components/LoadingSpinner'
 import { getWindowStartDate } from '../utils/timeWindows'
 import { SECTOR_COLORS } from '../config'
+import { WINDOW_TO_PERIOD } from '../services/localBackend'
 
 // ─── Chart tooltip ────────────────────────────────────────────────────────────
 function PriceTooltip({ active, payload, label }) {
@@ -175,11 +176,14 @@ export default function MyStockDetail() {
   const position = state.positions.find(p => p.ticker === ticker)
   const watchlistEntry = state.watchlist.find(w => w.ticker === ticker)
 
-  // Fix 2 — fetch history lazily when the user navigates to this page
+  // Fetch history with the period that matches the selected time window.
+  // Re-fires when the ticker changes (new page) or when the user picks a window
+  // that requires a larger dataset than what is currently cached.
   useEffect(() => {
-    actions.fetchHistoryForTicker(ticker, false)
+    const period = WINDOW_TO_PERIOD[window] ?? '1y'
+    actions.fetchHistoryForTicker(ticker, false, period)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ticker])
+  }, [ticker, window])
 
   if (!position && !watchlistEntry) {
     return (
