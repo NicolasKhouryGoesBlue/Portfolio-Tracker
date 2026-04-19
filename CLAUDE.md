@@ -6,7 +6,22 @@ Briefing for every new session. Read this before touching any code.
 
 ## Project purpose
 
-Personal investment portfolio dashboard. Tracks stock positions (with multiple purchase lots per position), calculates unrealized gain/loss, logs dividends, shows price history charts, and maintains a watchlist for stocks under consideration. No backend — all data lives in the browser via localStorage. Live prices come from Alpha Vantage's free tier API.
+Personal investment portfolio dashboard. Tracks stock positions with multiple purchase lots per position, calculates unrealized gain/loss, logs dividends, shows price history charts, and maintains a watchlist. All portfolio data persists in localStorage. Live prices and history come from a local Python backend that wraps yfinance. AI portfolio analysis is available via an Analysis tab that calls the same backend.
+
+This is **not** a no-backend app. It has two servers that must both be running.
+
+---
+
+## Architecture: two servers
+
+| Server | Technology | Port | Location |
+|---|---|---|---|
+| React frontend | Vite 5 + React 18 | 5173 | `Stock-Watchlist-V2/` (this repo) |
+| Python backend | FastAPI + uvicorn | 8000 | `../portfolio-backend/` (sibling directory) |
+
+The frontend never calls any external API directly. All price data, history, and AI analysis flow through `http://localhost:8000`. The frontend service layer (`src/services/localBackend.js`) is the only file that constructs requests to the backend.
+
+CORS is configured in the backend to allow only `http://localhost:5173`.
 
 ---
 
@@ -16,55 +31,154 @@ Personal investment portfolio dashboard. Tracks stock positions (with multiple p
 |---|---|
 | React 18 | UI framework |
 | Vite 5 | Dev server and build tool |
-| React Router v6 | Tab navigation (`/`, `/stocks`, `/stocks/:ticker`, `/positions`, `/watchlist`) |
-| Recharts | All charts — line charts, donut pie chart, sparklines |
-| Alpha Vantage API | Live stock quotes (`GLOBAL_QUOTE`) and daily price history (`TIME_SERIES_DAILY`) |
-| localStorage | Full persistence — portfolio data, API response cache, usage counter |
+| React Router v6 | Tab navigation (`/`, `/stocks`, `/stocks/:ticker`, `/positions`, `/watchlist`, `/analysis`) |
+| Recharts 2 | All charts — line charts, donut pie chart, sparklines |
+| FastAPI | Python backend HTTP framework |
+| uvicorn | ASGI server that runs FastAPI |
+| yfinance | Source of all stock price and history data |
+| Anthropic Python SDK | AI portfolio analysis (`claude-sonnet-4-6`) |
+| localStorage | Full persistence of portfolio data and API response cache |
 
 No TypeScript. No CSS framework. Styles are in `src/index.css` using CSS custom properties (dark theme, design tokens).
+
+---
+
+## How to start both servers
+
+**Frontend** (run from `Stock-Watchlist-V2/`):
+```bash
+npm install          # only needed once or after package.json changes
+npm run dev          # → http://localhost:5173
+```
+
+**Backend** (run from `../portfolio-backend/`):
+```bash
+source venv/bin/activate
+pip install -r requirements.txt    # only needed once
+uvicorn main:app --reload          # → http://localhost:8000
+```
+
+The backend requires an `ANTHROPIC_API_KEY` in a `.env` file inside `portfolio-backend/`. Without it, `/analyze` calls will fail but prices and history will still work.
+
+The frontend `.env` still contains `VITE_ALPHA_VANTAGE_KEY` — this key is no longer used by any active code. It is safe to ignore.
 
 ---
 
 ## File structure
 
 ```
-.env                              ← VITE_ALPHA_VANTAGE_KEY (not committed)
-src/
-  config.js                       ← API key ref, API_BASE_URL, CACHE_TTL_MS (24h), SECTORS list, SECTOR_COLORS map
-  main.jsx                        ← React entry point — mounts App into #root
-  App.jsx                         ← BrowserRouter + PortfolioProvider wrapper + route definitions
-  index.css                       ← All styles — dark theme tokens, layout, component classes
+Stock-Watchlist-V2/           ← React frontend (this repo)
+  .env                        ← VITE_ALPHA_VANTAGE_KEY (legacy, unused)
+  vite.config.js              ← Vite config — just enables React plugin
+  package.json                ← React 18, react-router-dom, recharts, vite
 
-  services/
-    alphaVantage.js               ← All API calls, localStorage cache (av_price_cache), request queue, usage counter
+  src/
+    config.js                 ← SECTORS list, SECTOR_COLORS map; also exports API_KEY
+                                 and API_BASE_URL (Alpha Vantage leftovers — not used)
+    main.jsx                  ← React entry point — mounts App into #root
+    App.jsx                   ← BrowserRouter + PortfolioProvider + all route definitions
+    index.css                 ← All styles — dark theme tokens, layout, component classes
 
-  store/
-    PortfolioContext.jsx          ← Global state via useReducer; exposes state + actions via usePortfolio()
-    placeholderData.js            ← Seed data injected on first load (AAPL position + empty watchlist)
+    services/
+      localBackend.js         ← Active backend service — all calls to http://localhost:8000;
+                                 localStorage cache; period coverage logic. See service layer section.
+      alphaVantage.js         ← Dead file — was the old API service; kept for reference,
+                                 not imported anywhere active
 
-  utils/
-    calculations.js               ← Pure math: calcPosition, calcPortfolioSummary, buildPortfolioHistory, etc.
-    formatters.js                 ← Currency, percent, gain, date, share formatting + gainClass helper
-    timeWindows.js                ← TIME_WINDOWS config + getWindowStartDate(key) → YYYY-MM-DD or null
+    store/
+      PortfolioContext.jsx    ← Global state via useReducer; exposes state + actions via
+                                 usePortfolio(). Imports from localBackend.js.
+      placeholderData.js      ← Seed data injected on first load (AAPL, GOOGL, MSFT)
 
-  components/
-    NavBar.jsx                    ← Sticky top nav with four tabs; active state via useLocation
-    Footer.jsx                    ← Static disclaimer footer
-    Modal.jsx                     ← Reusable modal wrapper (Escape to close, backdrop click to close)
-    ConfirmDialog.jsx             ← Delete confirmation built on Modal
-    LoadingSpinner.jsx            ← Inline spinner; size='sm' (default) or 'lg'
-    Sparkline.jsx                 ← 30-point miniature line chart with no axes; green/red/neutral
-    TimeWindowSelector.jsx        ← Button group for 1D/1W/MTD/1M/3M/6M/YTD/1Y/5Y/MAX
-    AddPositionModal.jsx          ← Add new position or add a lot to an existing one; accepts prefill prop
-    AddWatchlistModal.jsx         ← Add or edit a watchlist entry; accepts editEntry prop
+    utils/
+      calculations.js         ← Pure math: calcPosition, calcPortfolioSummary,
+                                 buildPortfolioHistory, calcBenchmarkComparison, etc.
+      formatters.js           ← Currency, percent, gain, date, formatDateTime + gainClass
+      timeWindows.js          ← TIME_WINDOWS array + getWindowStartDate(key) → YYYY-MM-DD
 
-  pages/
-    Dashboard.jsx                 ← Portfolio overview: summary metrics, value-over-time chart, sector donut, weights
-    MyStocks.jsx                  ← Card grid of all held positions with sparklines
-    MyStockDetail.jsx             ← Individual stock view at /stocks/:ticker — price chart, lots table, dividends, notes
-    AllPositions.jsx              ← Sortable list + grid toggle; Add Position button; delete positions
-    Watchlist.jsx                 ← Watchlist table with target price gap; Buy (convert), Edit, Delete per row
+    components/
+      NavBar.jsx              ← Sticky top nav — Dashboard, My Stocks, All Positions,
+                                 Watchlist, Analysis tabs; active state via useLocation
+      Footer.jsx              ← Disclaimer footer — "Stock prices provided by Yahoo Finance."
+      Modal.jsx               ← Reusable modal (Escape + backdrop click to close)
+      ConfirmDialog.jsx       ← Delete confirmation built on Modal
+      LoadingSpinner.jsx      ← Inline spinner; size='sm' (default) or 'lg'
+      Sparkline.jsx           ← 30-point miniature line chart, no axes; green/red/neutral
+      TimeWindowSelector.jsx  ← Button group for 1D/1W/MTD/1M/3M/6M/YTD/1Y/5Y/MAX
+      AddPositionModal.jsx    ← Add new position or add a lot to an existing one
+      AddWatchlistModal.jsx   ← Add or edit a watchlist entry
+
+    pages/
+      Dashboard.jsx           ← Portfolio overview: summary metrics, value-over-time chart
+                                 (with time window), sector donut, portfolio weights.
+                                 Silently auto-refreshes prices every 60 seconds.
+                                 Fetches 1y history on mount; fetches longer periods when
+                                 user selects a window not covered by cache.
+      MyStocks.jsx            ← Card grid of all positions with sparklines
+      MyStockDetail.jsx       ← /stocks/:ticker — price chart, lots table, dividends, notes.
+                                 Re-fetches history on ticker change or window change.
+      AllPositions.jsx        ← Sortable list + grid toggle; Add Position; delete positions
+      Watchlist.jsx           ← Table with target price gap; Buy (convert), Edit, Delete
+      Analysis.jsx            ← POSTs holdings to /analyze; renders AI analysis response
+
+../portfolio-backend/         ← Python backend (sibling directory, NOT inside this repo)
+  .env                        ← ANTHROPIC_API_KEY
+  requirements.txt            ← fastapi, uvicorn, yfinance, anthropic, python-dotenv, etc.
+  main.py                     ← FastAPI app with CORS, three endpoints: /prices, /history, /analyze
+  data_fetcher.py             ← get_portfolio_data() — fetches price + 1y history per ticker
+  analyzer.py                 ← analyze_portfolio() — builds prompt, calls Anthropic API
 ```
+
+---
+
+## Backend endpoints
+
+**`GET /prices/{ticker}`**
+- Calls `yf.Ticker(ticker).info`
+- Returns: `{ ticker, current_price, company_name, sector, market_cap, pe_ratio }`
+- Frontend reads: `current_price` only (rest not currently displayed)
+
+**`GET /history/{ticker}?period={period}`**
+- Valid periods: `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`, `5y`, `max`
+- Calls `stock.history(period=period, interval="1d")`
+- Returns: `{ ticker, period, history: [{date: "YYYY-MM-DD", close: float}] }`
+- Frontend converts to `{ "YYYY-MM-DD": number }` dict in `localBackend.js`
+
+**`POST /analyze`**
+- Body: `{ tickers: string[], holdings: { [ticker]: { quantity, cost_basis } } }`
+- Calls `data_fetcher.get_portfolio_data()` to fetch live prices, then `analyzer.analyze_portfolio()`
+- `analyzer.py` builds a prompt with portfolio metrics and calls `claude-sonnet-4-6` via Anthropic SDK
+- Returns: `{ analysis: string, status: "success" | "error" }`
+
+---
+
+## Service layer — localBackend.js
+
+This file is the only place the backend URL (`http://localhost:8000`) appears. It replaces the old `alphaVantage.js` entirely and exports the same interface.
+
+**Cache:** Uses `av_price_cache` localStorage key (same key as the old Alpha Vantage service — preserves any existing cached data). TTL is 24 hours (`CACHE_TTL_MS` from `config.js`). Quote and history have separate timestamps (`timestamp` and `historyTimestamp`) so a quote refresh doesn't invalidate history.
+
+**Period coverage logic:**
+```
+PERIOD_ORDER = ['1d', '5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5y', '10y', 'max']
+
+periodCovers(cachedPeriod, requestedPeriod):
+  → true if PERIOD_ORDER.indexOf(cachedPeriod) >= PERIOD_ORDER.indexOf(requestedPeriod)
+```
+If `5y` is cached, any shorter period request returns from cache without a network call.
+
+**Exports:**
+- `fetchQuote(ticker, forceRefresh)` — GET /prices/{ticker}, caches quote
+- `fetchHistory(ticker, forceRefresh, period)` — GET /history/{ticker}?period=..., caches history
+- `fetchTickerData(ticker, forceRefresh, period)` — both quote + history (used for forced refresh)
+- `getCachedEntry(ticker)` — reads current cache entry without fetching
+- `seedCacheEntry(ticker, quote, history)` — injects placeholder data at timestamp=0
+- `getLastUpdatedTimestamp()` — max quote timestamp across all cached tickers
+- `getOldestHistoryTimestamp(tickers)` — min historyTimestamp across given tickers
+- `WINDOW_TO_PERIOD` — maps UI window keys (1D, 1W, etc.) to yfinance period strings
+- `getQueueDepth()` — stub that returns 0 (kept for interface compatibility)
+
+**No request queue.** The local backend has no rate limits, so all fetches are made directly without delays.
 
 ---
 
@@ -72,47 +186,30 @@ src/
 
 1. **App mounts** → `PortfolioProvider` calls `buildInitialState()`:
    - Reads `pf_positions`, `pf_watchlist`, `pf_benchmark` from localStorage
-   - If `pf_positions` is null (first ever load), seeds placeholder data (AAPL + empty watchlist)
+   - If `pf_positions` is null (first ever load), seeds placeholder data (AAPL, GOOGL, MSFT)
    - Reads `av_price_cache` into `state.priceCache`
 
-2. **On mount**, `refreshPrices(false)` fires automatically:
+2. **On mount**, `refreshPrices(false)` fires:
    - Loops all position + watchlist tickers
-   - Calls `fetchQuote(ticker)` for each, spaced 15 seconds apart via the request queue
+   - Calls `fetchQuote(ticker)` for each (no queue gap — backend is local)
    - Dispatches `SET_TICKER_DATA` to update `state.priceCache` as each quote arrives
 
-3. **Dashboard and MyStockDetail trigger lazy history fetch**:
-   - Dashboard calls `actions.fetchHistoryForPositions(false)` on mount
-   - MyStockDetail calls `actions.fetchHistoryForTicker(ticker)` on mount
-   - History data (`TIME_SERIES_DAILY`) goes into `priceCache[ticker].history`
+3. **Dashboard fetches history lazily**:
+   - On mount: calls `actions.fetchHistoryForPositions(false)` with default `period='1y'`
+   - On window change: checks cache coverage via local `periodCoversLocal()` mirror; only
+     re-fetches if the new period isn't covered by `state.priceCache[ticker].historyPeriod`
+   - Dashboard auto-refreshes quotes every 60 seconds via `setInterval`
 
-4. **UI reads derived data**:
-   - All calculations (gain/loss, sector allocation, portfolio history) are pure functions in `calculations.js` that take `state.positions` and `state.priceCache` as inputs
-   - `buildPortfolioHistory` constructs the portfolio value-over-time series from cached history; uses `findPriceBefore` to fill non-trading days by looking up the nearest prior date
+4. **MyStockDetail fetches history on load**:
+   - Re-fetches on `[ticker, window]` changes using `WINDOW_TO_PERIOD[window]`
+   - Does not apply the coverage check — always asks for the selected period
 
-5. **User mutations** (add position, log dividend, update notes, etc.) dispatch actions to the reducer → `useEffect` hooks persist the changed slice to localStorage immediately
+5. **UI reads derived data**:
+   - Pure functions in `calculations.js` take `state.positions` and `state.priceCache` as inputs
+   - `buildPortfolioHistory` constructs portfolio value-over-time from cached history;
+     `findPriceBefore` fills non-trading days by scanning for the nearest prior date
 
----
-
-## API layer
-
-**Base URL:** `https://www.alphavantage.co/query`
-
-**Endpoints used:**
-- `GLOBAL_QUOTE` — current price, open, high, low, prev close, volume, change, change%
-- `TIME_SERIES_DAILY` — daily OHLCV history; parsed down to `{ 'YYYY-MM-DD': closePrice }`
-
-**Free tier constraints:**
-- 25 calls per day, 5 calls per minute
-- `outputsize=compact` only — returns last 100 trading days (~5 months). `outputsize=full` is a premium feature and returns an `Information` message instead of data. Never change this to `full`.
-- The request queue enforces a 15-second gap between calls (`QUEUE_GAP = 15_000ms`) to safely stay under the per-minute limit
-
-**Cache TTL:** 24 hours (`CACHE_TTL_MS` in `config.js`). Quote and history have separate timestamps so a quote refresh doesn't falsely mark un-fetched history as fresh.
-
-**Error handling:**
-- `isRateLimited(json)` checks the `Note` key for actual rate-limit messages. Returns `true` → caller returns cached data with `rateLimited: true`.
-- `Information` key in the response means a premium feature was requested. `isRateLimited` logs a console warning and returns `false` — this is NOT treated as a rate limit. If you see this, the request is misconfigured (e.g. wrong outputsize).
-- Network/parse errors fall into the catch block → return cached data if available, else `{ history: null, stale: true }`.
-- `historyFailed` in context state is set when any history fetch returns `rateLimited || stale`. It is **in-memory only** — resets to `false` on every page load.
+6. **User mutations** dispatch actions → `useEffect` hooks persist to localStorage immediately
 
 ---
 
@@ -123,10 +220,11 @@ src/
 | `pf_positions` | Array of position objects (ticker, companyName, sector, lots[], dividends[], notes) | Permanent until user clears browser data |
 | `pf_watchlist` | Array of watchlist entries (ticker, companyName, sector, targetBuyPrice, reason) | Permanent |
 | `pf_benchmark` | `{ initialSP, currentSP }` for S&P 500 comparison | Permanent |
-| `av_price_cache` | `{ [ticker]: { quote, history, timestamp, historyTimestamp } }` | Survives page loads; entries expire after 24h TTL |
-| `av_api_usage` | `{ count, resetAt }` — call counter for the 25/day display | Resets when `resetAt` timestamp passes (every 24h) |
+| `av_price_cache` | `{ [ticker]: { quote, history, historyPeriod, timestamp, historyTimestamp } }` | Survives reloads; entries expire after 24h TTL |
 
-Nothing is wiped on page load. All five keys persist across refreshes. First-load seed only runs when `pf_positions` is absent entirely.
+**Critical:** `localStorage.clear()` destroys the entire portfolio. The only persistent source of truth for holdings is `pf_positions` in localStorage. `placeholderData.js` is only used for first-load seeding — it does not restore data after clearing.
+
+`av_api_usage` (old Alpha Vantage call counter) is no longer read or written.
 
 ---
 
@@ -144,63 +242,57 @@ const { state, actions } = usePortfolio()
   positions: [],               // array of position objects
   watchlist: [],               // array of watchlist entries
   benchmark: {},               // { initialSP, currentSP }
-  priceCache: {},              // { [ticker]: { quote, history, timestamp, historyTimestamp } }
+  priceCache: {},              // { [ticker]: { quote, history, historyPeriod, timestamp, historyTimestamp } }
   loadingTickers: Set,         // tickers currently fetching a quote
   historyLoadingTickers: Set,  // tickers currently fetching history
-  historyFailed: false,        // true if any history fetch failed this session
-  apiWarning: null,            // string | null — shown as a banner on Dashboard
-  isRefreshing: false,         // true during manual full refresh
+  historyFailed: false,        // true if any history fetch failed this session (in-memory only)
+  apiWarning: null,            // string | null — shown as banner on Dashboard
+  isRefreshing: false,         // true while refreshPrices is running
   lastUpdated: null,           // timestamp of most recent quote fetch
 }
 ```
 
-**Key actions:** `addPosition`, `addLot`, `removeLot`, `addDividend`, `removeDividend`, `updateNotes`, `addWatchlistEntry`, `updateWatchlistEntry`, `removeWatchlistEntry`, `convertWatchlistToPosition`, `updateBenchmark`, `refreshPrices(force)`, `fetchHistoryForPositions(force)`, `fetchHistoryForTicker(ticker, force)`.
+**Key actions:** `addPosition`, `addLot`, `removeLot`, `addDividend`, `removeDividend`, `updateNotes`, `addWatchlistEntry`, `updateWatchlistEntry`, `removeWatchlistEntry`, `convertWatchlistToPosition`, `updateBenchmark`, `refreshPrices(force)`, `fetchHistoryForPositions(force, period)`, `fetchHistoryForTicker(ticker, force, period)`.
+
+---
+
+## Placeholder data
+
+Seeded on first load only (when `pf_positions` is absent from localStorage). Defined in `src/store/placeholderData.js`.
+
+Current seed holdings:
+- **AAPL** — 2 lots: 20 shares @ $135.87 on 2021-04-18; 15 shares @ $182.41 on 2023-11-10. 2 dividends ($14.60 each). Has notes.
+- **GOOGL** — 1 lot: 100 shares @ $37.50 on 2016-03-16. No dividends.
+- **MSFT** — 1 lot: 10 shares @ $270.50 on 2023-03-16. No dividends.
+
+**Real JP Morgan portfolio data has not yet been entered.** These are placeholder positions only.
+
+---
+
+## Known issues and deferred work
+
+**1D time range returns no data.** `getWindowStartDate('1D')` returns today minus 1 day, but the backend returns only trading-day close prices. On weekends and after market close, there are no intraday data points from yfinance's daily history endpoint, so the chart shows nothing. Needs either a different yfinance interval for 1D or a fallback display.
+
+**X-axis label readability on long-range charts.** On 5Y and MAX views, the x-axis tick labels overlap and become unreadable. Recharts' `interval="preserveStartEnd"` is not sufficient at this scale. Needs a custom tick formatter that reduces label density based on date range.
+
+**Benchmark Comparison uses manual inputs.** The Dashboard's Benchmark section requires the user to manually enter S&P 500 initial and current values. These should eventually be fetched from the backend via a `GET /history/^GSPC` call and populated automatically.
+
+**`config.js` contains dead Alpha Vantage exports.** `API_KEY` and `API_BASE_URL` are still exported from `config.js` but not imported anywhere active. They can be removed if a config cleanup task comes up.
+
+**`apiWarning` message in PortfolioContext still says "Alpha Vantage rate limit."** Line 315 in `PortfolioContext.jsx` dispatches a SET_API_WARNING with text referencing Alpha Vantage. The local backend never returns `rateLimited: true`, so this code path never fires — but it should be updated if the warning logic is ever activated.
 
 ---
 
 ## Known constraints and gotchas
 
-**outputsize=compact is non-negotiable.** The free API key only supports 100 days of history. Time windows beyond ~5 months (6M, YTD, 1Y, 5Y, MAX) will show truncated data — this is expected, not a bug.
+**Removing the last lot removes the position.** `REMOVE_LOT` filters out positions where `lots.length === 0`. Intentional.
 
-**History is lazy-loaded.** `refreshPrices` (called on mount) only fetches quotes. History is fetched separately by Dashboard and MyStockDetail on their own mount effects. If a user never visits the Dashboard or a detail page, history won't be in cache.
+**Watchlist "Buy" flow is asymmetric.** `handleConvertComplete` in `Watchlist.jsx` calls `removeWatchlistEntry` directly. The position is created by `AddPositionModal` via `addPosition`. The watchlist entry is removed in `onClose`, not in the reducer.
 
-**15-second queue gap.** With 8 tickers, a full history fetch takes ~2 minutes. The queue is serialised — all calls, quotes and history, share the same queue. Don't add parallel fetching without redesigning the queue.
+**`historyFailed` is in-memory only.** Resets to `false` on every page load. If the chart shows an error, refreshing the page clears it and retries.
 
-**Removing the last lot removes the position.** `REMOVE_LOT` filters out positions where `lots.length === 0`. This is intentional.
+**Sparklines use last 30 data points** from cached history. Show a flat neutral line if history is not yet loaded.
 
-**Watchlist "Buy" converts to position.** `handleConvertComplete` in Watchlist calls `removeWatchlistEntry` directly (does not use `convertWatchlistToPosition` action). The actual position is created by `AddPositionModal` via `addPosition`. This is slightly asymmetric — the watchlist entry is removed in `onClose`, not in the reducer.
+**Dashboard time window buttons do not cover all yfinance periods.** `DASH_PERIOD_MAP` maps YTD → `'1y'` (not `'ytd'`) because the backend's valid period list does not include `'ytd'`. This means the YTD chart may show slightly more data than strictly year-to-date.
 
-**Placeholder data:** On first load, a single AAPL position is seeded (2 lots, 2 dividends, notes). Watchlist and benchmark also have defaults. These are defined in `placeholderData.js` — update them if you want different seed data.
-
-**`historyFailed` is in-memory only.** It resets every page load. If the chart shows an error, refreshing the page clears the flag and retries.
-
-**Sparklines use last 30 data points** from cached history. If history hasn't loaded yet, they show a flat neutral line — not an error state.
-
----
-
-## How to run
-
-```bash
-# Install dependencies (only needed once or after package.json changes)
-npm install
-
-# Start dev server
-npm run dev
-# → http://localhost:5173 (or 5174 if 5173 is taken)
-
-# Stop dev server
-Ctrl+C
-```
-
-**.env file** must exist in the project root:
-```
-VITE_ALPHA_VANTAGE_KEY=your_key_here
-```
-
-Without `.env`, the app renders with placeholder data but all API calls return undefined key errors. Vite must be restarted after creating or changing `.env`.
-
-**Production build:**
-```bash
-npm run build    # outputs to dist/
-npm run preview  # serves the dist/ build locally
-```
+**History fetch guard (`historyFetchingRef`).** Only one `fetchHistoryForPositions` call can run at a time. A second call while the first is in progress is dropped silently.
