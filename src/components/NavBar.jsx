@@ -5,6 +5,7 @@ const tabs = [
   { to: '/stocks',     label: 'My Stocks'      },
   { to: '/positions',  label: 'All Positions'  },
   { to: '/watchlist',  label: 'Watchlist'      },
+  { to: '/analysis',  label: 'Analysis'       },
 ]
 
 export default function NavBar() {
