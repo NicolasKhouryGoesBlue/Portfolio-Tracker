@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { usePortfolio } from '../store/PortfolioContext'
 
 function renderMarkdown(text) {
@@ -38,6 +38,18 @@ export default function Analysis() {
   const [scenarioLoading, setScenarioLoading] = useState(false)
   const [scenarioResult, setScenarioResult] = useState(null)
   const [scenarioError, setScenarioError] = useState(null)
+
+  // ── Chat state ────────────────────────────────────────────────────────────────
+  const [chatMessages, setChatMessages] = useState([])
+  const [chatInput, setChatInput] = useState('')
+  const [chatLoading, setChatLoading] = useState(false)
+  const [chatError, setChatError] = useState(null)
+
+  const chatBottomRef = useRef(null)
+
+  useEffect(() => {
+    chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [chatMessages])
 
   // ── Existing handler — untouched ─────────────────────────────────────────────
   async function handleRunAnalysis() {
@@ -152,6 +164,53 @@ export default function Analysis() {
       setScenarioError(err.message)
     } finally {
       setScenarioLoading(false)
+    }
+  }
+
+  // ── Chat handler ──────────────────────────────────────────────────────────────
+  async function handleSendMessage() {
+    if (!chatInput.trim()) return
+    if (chatLoading) return
+
+    setChatLoading(true)
+    setChatError(null)
+
+    const userMessage = chatInput.trim()
+    setChatInput('')
+
+    // Capture prior history before appending the new user message
+    const priorHistory = chatMessages
+    setChatMessages(prev => [...prev, { role: 'user', content: userMessage }])
+
+    // Build holdings: quantity, cost_basis, and current_value where available
+    const holdings = {}
+    for (const pos of state.positions) {
+      const totalShares = pos.lots.reduce((s, l) => s + l.shares, 0)
+      const totalCost = pos.lots.reduce((s, l) => s + l.shares * l.pricePerShare, 0)
+      const avgCost = totalShares > 0 ? totalCost / totalShares : 0
+      const currentPrice = state.priceCache[pos.ticker]?.quote?.price
+      const entry = { quantity: totalShares, cost_basis: avgCost }
+      if (currentPrice != null) entry.current_value = totalShares * currentPrice
+      holdings[pos.ticker] = entry
+    }
+
+    try {
+      const res = await fetch('http://localhost:8000/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: userMessage,
+          conversation_history: priorHistory,
+          holdings,
+        }),
+      })
+      if (!res.ok) throw new Error(`Server responded with ${res.status}`)
+      const data = await res.json()
+      setChatMessages(prev => [...prev, { role: 'assistant', content: data.response }])
+    } catch (err) {
+      setChatError(err.message)
+    } finally {
+      setChatLoading(false)
     }
   }
 
@@ -414,6 +473,93 @@ export default function Analysis() {
           )}
         </div>
       )}
+
+      {/* ── Chat with Claude ─────────────────────────────────────────────────────── */}
+      <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '32px 0' }} />
+
+      <div className="card">
+        <div style={{
+          fontSize: 11,
+          fontWeight: 600,
+          letterSpacing: '.06em',
+          textTransform: 'uppercase',
+          color: 'var(--text-muted)',
+          marginBottom: 10,
+        }}>
+          Chat with Claude
+        </div>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
+          Ask anything about your portfolio. Claude knows your holdings, prices, and sector weights.
+        </p>
+
+        {chatMessages.length > 0 && (
+          <div style={{
+            height: 400,
+            overflowY: 'auto',
+            marginBottom: 12,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}>
+            {chatMessages.map((msg, i) => (
+              <div
+                key={i}
+                style={{
+                  display: 'flex',
+                  justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                }}
+              >
+                <div style={{
+                  maxWidth: msg.role === 'user' ? '75%' : '85%',
+                  background: msg.role === 'user' ? 'var(--blue)' : 'rgba(255,255,255,0.06)',
+                  color: msg.role === 'user' ? '#fff' : 'var(--text)',
+                  borderRadius: 12,
+                  padding: '10px 14px',
+                  fontSize: 13,
+                  lineHeight: 1.6,
+                }}>
+                  {msg.role === 'assistant'
+                    ? <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+                    : msg.content
+                  }
+                </div>
+              </div>
+            ))}
+            <div ref={chatBottomRef} />
+          </div>
+        )}
+
+        {chatLoading && (
+          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
+            Claude is thinking...
+          </p>
+        )}
+
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <input
+            type="text"
+            value={chatInput}
+            onChange={e => setChatInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) handleSendMessage() }}
+            placeholder="Ask about your portfolio..."
+            disabled={chatLoading}
+            style={{ flex: 1 }}
+          />
+          <button
+            className="btn btn-primary"
+            onClick={handleSendMessage}
+            disabled={chatLoading || !chatInput.trim()}
+          >
+            Send
+          </button>
+        </div>
+
+        {chatError && (
+          <p style={{ fontSize: 13, color: 'var(--red)', marginTop: 10 }}>
+            {chatError}
+          </p>
+        )}
+      </div>
     </div>
   )
 }
