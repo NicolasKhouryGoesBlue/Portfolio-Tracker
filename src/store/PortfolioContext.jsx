@@ -1,8 +1,7 @@
-import { createContext, useContext, useReducer, useEffect, useCallback, useRef } from 'react'
+import { createContext, useContext, useReducer, useState, useEffect, useCallback, useRef } from 'react'
 import {
   fetchQuote,
   fetchHistory,
-  fetchTickerData,
   getCachedEntry,
   seedCacheEntry,
   getLastUpdatedTimestamp,
@@ -13,6 +12,58 @@ import {
   PLACEHOLDER_BENCHMARK,
   PLACEHOLDER_PRICES,
 } from './placeholderData'
+import { buildPortfolioHistory } from '../utils/calculations'
+
+// ─── Benchmark helpers ────────────────────────────────────────────────────────
+
+/** Returns the earliest lot purchase date across all positions, or null. */
+export function getEarliestPurchaseDate(positions) {
+  const dates = positions.flatMap(p => p.lots.map(l => l.date)).filter(Boolean)
+  if (dates.length === 0) return null
+  return dates.sort()[0]
+}
+
+/**
+ * Rebase a {date, value}[] series to 100 at the first available trading day
+ * on or after anchorDate. Returns [] if anchorDate is beyond the series end.
+ */
+export function normalizeSeries(series, anchorDate) {
+  if (!series || series.length === 0 || !anchorDate) return []
+  const anchorEntry = series.find(d => d.date >= anchorDate)
+  if (!anchorEntry || !anchorEntry.value) return []
+  const base = anchorEntry.value
+  return series
+    .filter(d => d.date >= anchorEntry.date)
+    .map(d => ({ date: d.date, value: (d.value / base) * 100 }))
+}
+
+/**
+ * Derives normalized portfolio and benchmark series from state.
+ * Returns { anchorDate, portfolioNormalized, benchmarkNormalized } or null
+ * if ^GSPC history is not yet loaded or there are no positions.
+ */
+export function computeBenchmarkData(state) {
+  const { positions, priceCache } = state
+  if (!positions || positions.length === 0) return null
+
+  const anchorDate = getEarliestPurchaseDate(positions)
+  if (!anchorDate) return null
+
+  const benchmarkHistory = priceCache['^GSPC']?.history
+  if (!benchmarkHistory) return null
+
+  const portfolioSeries = buildPortfolioHistory(positions, priceCache, null)
+  if (portfolioSeries.length === 0) return null
+
+  const benchmarkSeries = Object.keys(benchmarkHistory)
+    .sort()
+    .map(date => ({ date, value: benchmarkHistory[date] }))
+
+  const portfolioNormalized = normalizeSeries(portfolioSeries, anchorDate)
+  const benchmarkNormalized = normalizeSeries(benchmarkSeries, anchorDate)
+
+  return { anchorDate, portfolioNormalized, benchmarkNormalized }
+}
 
 // ─── LocalStorage keys ────────────────────────────────────────────────────────
 const LS_POSITIONS  = 'pf_positions'
@@ -232,6 +283,20 @@ function reducer(state, action) {
     case 'SET_REFRESHING':
       return { ...state, isRefreshing: action.value }
 
+    case 'SET_ALL_HISTORY': {
+      const priceCache = { ...state.priceCache }
+      for (const { ticker, history, historyPeriod, historyTimestamp } of action.payload) {
+        const prev = priceCache[ticker] ?? {}
+        priceCache[ticker] = {
+          ...prev,
+          history:          history       != null ? history       : (prev.history          ?? null),
+          historyPeriod:    historyPeriod != null ? historyPeriod : (prev.historyPeriod    ?? null),
+          historyTimestamp: historyTimestamp       ?? prev.historyTimestamp ?? 0,
+        }
+      }
+      return { ...state, priceCache }
+    }
+
     case 'SET_API_WARNING':
       return { ...state, apiWarning: action.message }
 
@@ -249,6 +314,14 @@ const PortfolioContext = createContext(null)
 export function PortfolioProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, null, buildInitialState)
   const fetchingRef = useRef(false)
+
+  // ── Analysis tab persistent state ─────────────────────────────────────────
+  const [analysisResult, setAnalysisResult] = useState(null)
+  const [analysisNewsData, setAnalysisNewsData] = useState(null)
+  const [scenarioResult, setScenarioResult] = useState(null)
+  const [scenarioInput, setScenarioInput] = useState('')
+  const [chatMessages, setChatMessages] = useState([])
+  const [showFullAnalysis, setShowFullAnalysis] = useState(false)
 
   // ── Persist portfolio data to localStorage on every change ────────────────
   useEffect(() => { saveLS(LS_POSITIONS, state.positions) }, [state.positions])
@@ -288,21 +361,16 @@ export function PortfolioProvider({ children }) {
     for (const ticker of tickers) {
       dispatch({ type: 'SET_LOADING_TICKER', ticker, loading: true })
       try {
-        // Auto-load: quotes only. Manual force-refresh: quotes + history.
-        const result = force
-          ? await fetchTickerData(ticker, true)
-          : await fetchQuote(ticker, false)
+        const result = await fetchQuote(ticker, force)
 
         if (result.rateLimited) anyRateLimited = true
         if (result.stale)       anyStale       = true
 
         dispatch({
-          type:          'SET_TICKER_DATA',
+          type:      'SET_TICKER_DATA',
           ticker,
-          quote:         result.quote,
-          history:       result.history       ?? undefined,  // preserve existing when quotes-only
-          historyPeriod: result.period        ?? undefined,
-          timestamp:     Date.now(),
+          quote:     result.quote,
+          timestamp: Date.now(),
         })
       } catch (e) {
         console.warn(`Failed to fetch ${ticker}:`, e)
@@ -337,33 +405,59 @@ export function PortfolioProvider({ children }) {
     dispatch({ type: 'SET_HISTORY_FAILED', value: false })
 
     const tickers = [...new Set(state.positions.map(p => p.ticker))]
-    let anyFailed = false
 
+    // Mark all as loading before any fetches begin
     for (const ticker of tickers) {
       dispatch({ type: 'SET_HISTORY_LOADING_TICKER', ticker, loading: true })
-      try {
-        const result = await fetchHistory(ticker, force, period)
-        if (result.rateLimited || result.stale) anyFailed = true
-        // Dispatch only the history fields so quote/timestamp are preserved
-        const cached = getCachedEntry(ticker)
-        dispatch({
-          type:             'SET_TICKER_DATA',
-          ticker,
-          history:          result.history,
-          historyPeriod:    result.period ?? undefined,
-          historyTimestamp: result.fromCache && !force
-            ? (cached?.historyTimestamp ?? Date.now())
-            : Date.now(),
-        })
-      } catch (e) {
-        console.warn(`fetchHistory(${ticker}) failed:`, e)
-        anyFailed = true
-      } finally {
-        dispatch({ type: 'SET_HISTORY_LOADING_TICKER', ticker, loading: false })
-      }
     }
 
-    if (anyFailed) dispatch({ type: 'SET_HISTORY_FAILED', value: true })
+    // Fire all history fetches in parallel
+    const results = await Promise.all(
+      tickers.map(async (ticker) => {
+        try {
+          const result = await fetchHistory(ticker, force, period)
+          const cached = getCachedEntry(ticker)
+          return {
+            ticker,
+            history:          result.history,
+            historyPeriod:    result.period ?? undefined,
+            historyTimestamp: result.fromCache && !force
+              ? (cached?.historyTimestamp ?? Date.now())
+              : Date.now(),
+            failed: !!(result.rateLimited || result.stale),
+          }
+        } catch (e) {
+          console.warn(`fetchHistory(${ticker}) failed:`, e)
+          return { ticker, history: null, historyPeriod: undefined, historyTimestamp: 0, failed: true }
+        }
+      })
+    )
+
+    // Single state update after all tickers have resolved — prevents intermediate renders
+    dispatch({ type: 'SET_ALL_HISTORY', payload: results })
+
+    for (const ticker of tickers) {
+      dispatch({ type: 'SET_HISTORY_LOADING_TICKER', ticker, loading: false })
+    }
+
+    if (results.some(r => r.failed)) dispatch({ type: 'SET_HISTORY_FAILED', value: true })
+
+    // Fetch ^GSPC benchmark history — always max period, failure is non-fatal
+    try {
+      const benchResult = await fetchHistory('^GSPC', force, 'max')
+      if (benchResult.history) {
+        dispatch({
+          type:             'SET_TICKER_DATA',
+          ticker:           '^GSPC',
+          history:          benchResult.history,
+          historyPeriod:    'max',
+          historyTimestamp: Date.now(),
+        })
+      }
+    } catch {
+      // Benchmark fetch failure does not affect positions or historyFailed
+    }
+
     historyFetchingRef.current = false
   }, [state.positions])
 
@@ -482,7 +576,16 @@ export function PortfolioProvider({ children }) {
     },
   }
 
-  const value = { state, actions }
+  const value = {
+    state,
+    actions,
+    analysisResult, setAnalysisResult,
+    analysisNewsData, setAnalysisNewsData,
+    scenarioResult, setScenarioResult,
+    scenarioInput, setScenarioInput,
+    chatMessages, setChatMessages,
+    showFullAnalysis, setShowFullAnalysis,
+  }
   return <PortfolioContext.Provider value={value}>{children}</PortfolioContext.Provider>
 }
 

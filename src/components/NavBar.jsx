@@ -6,6 +6,7 @@ const tabs = [
   { to: '/positions',  label: 'All Positions'  },
   { to: '/watchlist',  label: 'Watchlist'      },
   { to: '/analysis',  label: 'Analysis'       },
+  { to: '/news',      label: 'News'           },
 ]
 
 export default function NavBar() {

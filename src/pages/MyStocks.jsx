@@ -81,7 +81,7 @@ export default function MyStocks() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
                 <div>
                   <div className="mono" style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 2 }}>
-                    {formatCurrency(pos.currentPrice)} / share
+                    Current: {formatCurrency(pos.currentPrice)} / share
                   </div>
                   <div className="card-price">{formatCurrency(pos.currentValue)}</div>
                   <div className={`card-gain ${gc}`}>
@@ -104,12 +104,6 @@ export default function MyStocks() {
                 <div>
                   <div style={{ color: 'var(--text-muted)' }}>Cost Basis</div>
                   <div className="mono">{formatCurrency(pos.totalCostBasis)}</div>
-                </div>
-                <div>
-                  <div style={{ color: 'var(--text-muted)' }}>Total Return</div>
-                  <div className={`mono ${gainClass(pos.totalReturn)}`}>
-                    {formatGain(pos.totalReturn)}
-                  </div>
                 </div>
               </div>
 

@@ -1,8 +1,3 @@
-// Central configuration — the only place the API key is referenced
-export const API_KEY = import.meta.env.VITE_ALPHA_VANTAGE_KEY
-
-export const API_BASE_URL = 'https://www.alphavantage.co/query'
-
 // 24 hours in milliseconds — cache TTL
 export const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 

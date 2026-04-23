@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { usePortfolio } from '../store/PortfolioContext'
+import NewsList from '../components/NewsList'
 
 function renderMarkdown(text) {
   // Convert markdown-like formatting to HTML
@@ -25,38 +26,45 @@ function renderMarkdown(text) {
 }
 
 export default function Analysis() {
-  const { state } = usePortfolio()
+  const {
+    state,
+    analysisResult, setAnalysisResult,
+    analysisNewsData, setAnalysisNewsData,
+    scenarioResult, setScenarioResult,
+    scenarioInput, setScenarioInput,
+    chatMessages, setChatMessages,
+    showFullAnalysis, setShowFullAnalysis,
+  } = usePortfolio()
 
   // ── Existing portfolio analysis state ────────────────────────────────────────
   const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
-  const [newsData, setNewsData] = useState(null)
 
   // ── Scenario analysis state ───────────────────────────────────────────────────
-  const [scenarioInput, setScenarioInput] = useState('')
   const [scenarioLoading, setScenarioLoading] = useState(false)
-  const [scenarioResult, setScenarioResult] = useState(null)
   const [scenarioError, setScenarioError] = useState(null)
 
   // ── Chat state ────────────────────────────────────────────────────────────────
-  const [chatMessages, setChatMessages] = useState([])
   const [chatInput, setChatInput] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
   const [chatError, setChatError] = useState(null)
 
   const chatBottomRef = useRef(null)
+  const prevChatLengthRef = useRef(chatMessages.length)
 
   useEffect(() => {
-    chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (chatMessages.length > prevChatLengthRef.current) {
+      prevChatLengthRef.current = chatMessages.length
+      chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
   }, [chatMessages])
 
   // ── Existing handler — untouched ─────────────────────────────────────────────
   async function handleRunAnalysis() {
     setLoading(true)
-    setResult(null)
+    setAnalysisResult(null)
     setError(null)
-    setNewsData(null)
+    setAnalysisNewsData(null)
 
     // Build holdings from state, falling back to placeholder if no positions
     let tickers
@@ -117,13 +125,13 @@ export default function Analysis() {
         throw new Error(data.error ?? 'Analysis failed')
       }
 
-      setResult(data.analysis)
+      setAnalysisResult(data.analysis)
 
       const news = {}
       for (const [ticker, headlines] of newsResults) {
         news[ticker] = headlines
       }
-      setNewsData(news)
+      setAnalysisNewsData(news)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -215,7 +223,13 @@ export default function Analysis() {
   }
 
   // ── Derived display values ────────────────────────────────────────────────────
-  const hasAnyNews = newsData != null && Object.values(newsData).some(h => h.length > 0)
+  const hasAnyNews = analysisNewsData != null && Object.values(analysisNewsData).some(h => h.length > 0)
+
+  const DIVIDER = '---FULL ANALYSIS---'
+  const analysisParts = analysisResult ? analysisResult.split(DIVIDER) : null
+  const bulletSection = analysisParts ? analysisParts[0].trim() : null
+  const fullSection = analysisParts && analysisParts.length >= 2 ? analysisParts[1].trim() : null
+  const hasDivider = fullSection !== null
 
   // Inline formatters for scenario results (no external import needed)
   function fmtImpact(n) {
@@ -271,7 +285,7 @@ export default function Analysis() {
         </div>
       )}
 
-      {result && !loading && (
+      {analysisResult && !loading && (
         <div className="card">
           <div style={{
             fontSize: 11,
@@ -283,10 +297,43 @@ export default function Analysis() {
           }}>
             Analysis Result
           </div>
+
+          {/* Bullets section — always shown */}
           <div
             style={{ fontSize: 14, lineHeight: 1.7, color: 'var(--text)' }}
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(result) }}
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(hasDivider ? bulletSection : analysisResult) }}
           />
+
+          {/* Toggle — only shown when the divider was present */}
+          {hasDivider && (
+            <>
+              <button
+                onClick={() => setShowFullAnalysis(v => !v)}
+                style={{
+                  marginTop: 14,
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  fontSize: 13,
+                  color: 'var(--blue)',
+                  cursor: 'pointer',
+                  textDecoration: 'underline',
+                }}
+              >
+                {showFullAnalysis ? 'Hide full analysis' : 'Show full analysis'}
+              </button>
+
+              {showFullAnalysis && (
+                <>
+                  <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '16px 0' }} />
+                  <div
+                    style={{ fontSize: 14, lineHeight: 1.7, color: 'var(--text)' }}
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(fullSection) }}
+                  />
+                </>
+              )}
+            </>
+          )}
 
           {hasAnyNews && (
             <>
@@ -301,7 +348,7 @@ export default function Analysis() {
               }}>
                 Recent News
               </div>
-              {Object.entries(newsData)
+              {Object.entries(analysisNewsData)
                 .filter(([, headlines]) => headlines.length > 0)
                 .map(([ticker, headlines]) => (
                   <div key={ticker} style={{ marginBottom: 18 }}>
@@ -311,22 +358,7 @@ export default function Analysis() {
                     >
                       {ticker}
                     </div>
-                    <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      {headlines.map((headline, i) => (
-                        <li
-                          key={i}
-                          style={{
-                            fontSize: 13,
-                            color: 'var(--text)',
-                            lineHeight: 1.5,
-                            paddingLeft: 12,
-                            borderLeft: '2px solid var(--border-light)',
-                          }}
-                        >
-                          {headline}
-                        </li>
-                      ))}
-                    </ul>
+                    <NewsList items={headlines} />
                   </div>
                 ))
               }

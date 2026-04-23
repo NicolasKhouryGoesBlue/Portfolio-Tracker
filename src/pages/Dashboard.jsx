@@ -4,13 +4,12 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, PieChart, Pie, Cell, Legend,
 } from 'recharts'
-import { usePortfolio } from '../store/PortfolioContext'
+import { usePortfolio, computeBenchmarkData } from '../store/PortfolioContext'
 import {
   calcPortfolioSummary,
   calcSectorAllocation,
   calcPortfolioWeights,
   buildPortfolioHistory,
-  calcBenchmarkComparison,
 } from '../utils/calculations'
 import { formatCurrency, formatPercent, formatGain, formatDateTime, gainClass } from '../utils/formatters'
 import TimeWindowSelector from '../components/TimeWindowSelector'
@@ -69,10 +68,36 @@ function SectorTooltip({ active, payload }) {
   )
 }
 
+function BenchmarkTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null
+  const portfolioVal = payload.find(p => p.dataKey === 'portfolio')?.value
+  const benchmarkVal = payload.find(p => p.dataKey === 'benchmark')?.value
+  const dateLabel = label
+    ? new Date(label + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    : ''
+  return (
+    <div style={{
+      background: 'var(--bg-card)',
+      border: '1px solid var(--border-light)',
+      borderRadius: 'var(--radius-sm)',
+      padding: '8px 12px',
+      fontSize: 12,
+    }}>
+      <div style={{ color: 'var(--text-muted)', marginBottom: 4 }}>{dateLabel}</div>
+      {portfolioVal != null && (
+        <div className="mono" style={{ color: 'var(--green)' }}>Your Portfolio: {portfolioVal.toFixed(0)}</div>
+      )}
+      {benchmarkVal != null && (
+        <div className="mono" style={{ color: 'var(--blue)' }}>S&P 500: {benchmarkVal.toFixed(0)}</div>
+      )}
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const { state, actions } = usePortfolio()
   const navigate = useNavigate()
-  const [window, setWindow] = useState('1Y')
+  const [window, setWindow] = useState('MAX')
 
   const summary = useMemo(
     () => calcPortfolioSummary(state.positions, state.priceCache),
@@ -95,24 +120,58 @@ export default function Dashboard() {
     [state.positions, state.priceCache, startDate]
   )
 
-  const benchmark = useMemo(
-    () => calcBenchmarkComparison(summary.totalReturnPct, state.benchmark),
-    [summary.totalReturnPct, state.benchmark]
-  )
+  const benchData = useMemo(() => computeBenchmarkData(state), [state])
 
-  // Format dates for chart X axis
+  const comparisonChartData = useMemo(() => {
+    if (!benchData) return []
+    const { portfolioNormalized, benchmarkNormalized } = benchData
+    // O(n) two-pointer merge — both arrays are date-sorted
+    const result = []
+    let pi = 0
+    let bi = 0
+    while (pi < portfolioNormalized.length && bi < benchmarkNormalized.length) {
+      const pd = portfolioNormalized[pi].date
+      const bd = benchmarkNormalized[bi].date
+      if (pd === bd) {
+        result.push({ date: pd, portfolio: portfolioNormalized[pi].value, benchmark: benchmarkNormalized[bi].value })
+        pi++; bi++
+      } else if (pd < bd) {
+        result.push({ date: pd, portfolio: portfolioNormalized[pi].value, benchmark: null })
+        pi++
+      } else {
+        result.push({ date: bd, portfolio: null, benchmark: benchmarkNormalized[bi].value })
+        bi++
+      }
+    }
+    while (pi < portfolioNormalized.length) {
+      result.push({ date: portfolioNormalized[pi].date, portfolio: portfolioNormalized[pi].value, benchmark: null })
+      pi++
+    }
+    while (bi < benchmarkNormalized.length) {
+      result.push({ date: benchmarkNormalized[bi].date, portfolio: null, benchmark: benchmarkNormalized[bi].value })
+      bi++
+    }
+    return result
+  }, [benchData])
+
   const chartData = historyData.map(d => ({
     date: d.date,
     value: d.value,
-    // Short label for axis
-    label: new Date(d.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
   }))
 
   const hasChartData = chartData.length >= 2
 
-  // Fetch 1y history once on mount
+  const chartColor = (() => {
+    if (!chartData || chartData.length < 2) return 'var(--accent)'
+    const first = chartData[0]?.value
+    const last = chartData[chartData.length - 1]?.value
+    if (first == null || last == null) return 'var(--accent)'
+    return last >= first ? 'var(--green)' : 'var(--red)'
+  })()
+
+  // Fetch history on mount using the initial window period
   useEffect(() => {
-    actions.fetchHistoryForPositions(false)
+    actions.fetchHistoryForPositions(false, DASH_PERIOD_MAP['MAX'] ?? 'max')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -120,6 +179,8 @@ export default function Dashboard() {
   // cached period doesn't already cover it. Skips on the initial render so the
   // mount effect above handles the first fetch without doubling up.
   const isFirstWindowRender = useRef(true)
+  const windowRef = useRef(window)
+  useEffect(() => { windowRef.current = window }, [window])
   useEffect(() => {
     if (isFirstWindowRender.current) {
       isFirstWindowRender.current = false
@@ -141,7 +202,10 @@ export default function Dashboard() {
 
   // Auto-refresh prices every 60 seconds
   useEffect(() => {
-    const id = setInterval(() => actions.refreshPrices(true), 60_000)
+    const id = setInterval(() => {
+      actions.refreshPrices(true)
+      actions.fetchHistoryForPositions(true, DASH_PERIOD_MAP[windowRef.current] ?? 'max')
+    }, 60_000)
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -153,8 +217,154 @@ export default function Dashboard() {
     return () => clearInterval(id)
   }, [])
 
+  const getTickDates = (data, win) => {
+    if (!data || data.length === 0) return []
+
+    switch (win) {
+      case 'MAX': {
+        const seen = new Set()
+        return data
+          .filter(d => {
+            const year = d.date.slice(0, 4)
+            if (seen.has(year)) return false
+            seen.add(year)
+            return true
+          })
+          .map(d => d.date)
+      }
+
+      case '5Y': {
+        const seen = new Set()
+        return data
+          .filter(d => {
+            const month = parseInt(d.date.slice(5, 7), 10)
+            const year = d.date.slice(0, 4)
+            const half = month <= 6 ? 'H1' : 'H2'
+            const key = `${year}-${half}`
+            if (seen.has(key)) return false
+            const isH1Start = month === 1
+            const isH2Start = month === 7
+            if (!isH1Start && !isH2Start) return false
+            seen.add(key)
+            return true
+          })
+          .map(d => d.date)
+      }
+
+      case '1Y': {
+        const seen = new Set()
+        return data
+          .filter(d => {
+            const month = parseInt(d.date.slice(5, 7), 10)
+            const year = d.date.slice(0, 4)
+            const isBiMonth = month % 2 === 1
+            const key = `${year}-${month}`
+            if (!isBiMonth || seen.has(key)) return false
+            seen.add(key)
+            return true
+          })
+          .map(d => d.date)
+      }
+
+      case 'YTD': {
+        const seen = new Set()
+        return data
+          .filter(d => {
+            const yearMonth = d.date.slice(0, 7)
+            if (seen.has(yearMonth)) return false
+            seen.add(yearMonth)
+            return true
+          })
+          .map(d => d.date)
+      }
+
+      case '6M': {
+        // One tick per month — first trading day of each month
+        // Same logic as YTD but applied to 6M range
+        const seen = new Set()
+        return data
+          .filter(d => {
+            const yearMonth = d.date.slice(0, 7)  // "2025-12"
+            if (seen.has(yearMonth)) return false
+            seen.add(yearMonth)
+            return true
+          })
+          .map(d => d.date)
+      }
+
+      case '3M': {
+        const seen = new Set()
+        return data
+          .filter(d => {
+            const day = parseInt(d.date.slice(8, 10), 10)
+            const yearMonth = d.date.slice(0, 7)
+            const half = day <= 14 ? 'A' : 'B'
+            const key = `${yearMonth}-${half}`
+            if (seen.has(key)) return false
+            const isAnchor = (day >= 1 && day <= 7) || (day >= 15 && day <= 21)
+            if (!isAnchor) return false
+            seen.add(key)
+            return true
+          })
+          .map(d => d.date)
+      }
+
+      default:
+        return undefined
+    }
+  }
+
+  const formatAxisLabel = (dateStr, win) => {
+    if (!dateStr) return ''
+    const date = new Date(dateStr + 'T00:00:00')
+
+    if (win === 'MAX') {
+      return date.getFullYear().toString()
+    }
+    if (win === '5Y' || win === '1Y') {
+      return date.toLocaleDateString('en-US', { month: 'short' }) + ' ' + date.getFullYear()
+    }
+    if (win === 'YTD' || win === '6M') {
+      return date.toLocaleDateString('en-US', { month: 'short' }) + ' ' + date.getFullYear()
+    }
+    if (win === '3M') {
+      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    }
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  }
+
   const totalGainClass = gainClass(summary.totalReturn)
   const hasPositions = state.positions.length > 0
+
+  const yDomain = (() => {
+    if (!chartData || chartData.length === 0) return ['auto', 'auto']
+
+    const shortRanges = ['1W', 'MTD', '1M', '3M', '6M', 'YTD', '1Y']
+    if (!shortRanges.includes(window)) {
+      const allValues = chartData.map(d => d.value).filter(v => v != null)
+      const maxVal = allValues.length > 0 ? Math.max(...allValues) : 0
+      return [0, Math.ceil((maxVal * 1.10) / 1000) * 1000]
+    }
+
+    const values = chartData.map(d => d.value).filter(v => v != null)
+    if (values.length === 0) return ['auto', 'auto']
+
+    const min = Math.min(...values)
+    const max = Math.max(...values)
+    const padding = (max - min) * 0.15
+
+    return [
+      Math.floor((min - padding) / 1000) * 1000,
+      Math.ceil((max + padding) / 1000) * 1000,
+    ]
+  })()
+
+  const yTicks = (() => {
+    const [min, max] = yDomain
+    if (min === 'auto' || max === 'auto') return undefined
+    const step = Math.ceil((max - min) / 4 / 1000) * 1000
+    return [0, 1, 2, 3, 4].map(i => min + i * step)
+  })()
 
   return (
     <div className="page">
@@ -179,12 +389,12 @@ export default function Dashboard() {
         <div className="metric-card">
           <span className="m-label">Portfolio Value</span>
           <span className="m-value mono">{formatCurrency(summary.totalValue)}</span>
-          <span className="m-sub">Invested {formatCurrency(summary.totalInvested)}</span>
+          <span className="m-sub">Invested {formatCurrency(summary.totalInvested)} (all lots)</span>
         </div>
         <div className="metric-card">
           <span className="m-label">Total Return</span>
           <span className={`m-value mono ${totalGainClass}`}>{formatGain(summary.totalReturn)}</span>
-          <span className={`m-sub ${totalGainClass}`}>{formatPercent(summary.totalReturnPct)}</span>
+          <span className={`m-sub ${totalGainClass}`}>({formatPercent(summary.totalReturnPct)})</span>
         </div>
         <div className="metric-card">
           <span className="m-label">Unrealized Gain</span>
@@ -192,7 +402,7 @@ export default function Dashboard() {
             {formatGain(summary.totalUnrealizedGain)}
           </span>
           <span className={`m-sub ${gainClass(summary.unrealizedGainPct)}`}>
-            {formatPercent(summary.unrealizedGainPct)} price appreciation
+            ({formatPercent(summary.unrealizedGainPct)})
           </span>
         </div>
         <div className="metric-card">
@@ -217,27 +427,97 @@ export default function Dashboard() {
               <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
                 <XAxis
-                  dataKey="label"
-                  tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-                  tickLine={false}
+                  dataKey="date"
+                  ticks={getTickDates(chartData, window)}
+                  tickFormatter={(dateStr) => formatAxisLabel(dateStr, window)}
+                  tick={{ fontSize: 11, fill: 'var(--text-muted)' }}
                   axisLine={false}
-                  interval="preserveStartEnd"
+                  tickLine={false}
                 />
                 <YAxis
+                  domain={yDomain}
+                  ticks={yTicks}
+                  tickCount={5}
                   tickFormatter={v => `$${(v / 1000).toFixed(0)}k`}
                   tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
                   tickLine={false}
                   axisLine={false}
                   width={52}
                 />
-                <Tooltip content={<ChartTooltip />} />
+                <Tooltip
+                  content={<ChartTooltip />}
+                  labelFormatter={(label) => {
+                    if (!label) return ''
+                    const date = new Date(label + 'T00:00:00')
+                    return date.toLocaleDateString('en-US', {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric'
+                    })
+                  }}
+                />
                 <Line
                   type="monotone"
                   dataKey="value"
-                  stroke="var(--blue)"
+                  stroke={chartColor}
                   strokeWidth={2}
-                  dot={false}
-                  activeDot={{ r: 4, fill: 'var(--blue)' }}
+                  dot={(props) => {
+                    const { cx, cy, index } = props
+                    if (index !== 0 && index !== chartData.length - 1) return null
+
+                    const value = chartData[index]?.value
+                    if (value == null) return null
+
+                    const isFirst = index === 0
+                    const label = value >= 1000
+                      ? `$${(value / 1000).toFixed(0)}k`
+                      : `$${value.toFixed(0)}`
+
+                    let slopeUp
+                    if (isFirst) {
+                      const nextValue = chartData[1]?.value
+                      slopeUp = nextValue != null ? nextValue >= value : true
+                    } else {
+                      const prevValue = chartData[chartData.length - 2]?.value
+                      slopeUp = prevValue != null ? value >= prevValue : true
+                    }
+
+                    const CHART_H = 260 // matches ResponsiveContainer height prop
+                    const offset = (window === '5Y' || window === 'MAX') ? 10 : 18
+                    const rightDown = cy + offset
+                    const rightUp = cy - offset
+                    const labelY = isFirst
+                      ? (slopeUp ? cy + 16 : cy - 8)
+                      : (slopeUp
+                          ? (rightDown > CHART_H - 20 ? rightUp : rightDown)
+                          : (rightUp < 10 ? rightDown : rightUp))
+                    const labelAnchor = isFirst ? 'start' : 'end'
+                    const labelX = isFirst ? cx + 6 : cx - 6
+
+                    return (
+                      <g key={`endpoint-${index}`}>
+                        <circle
+                          cx={cx}
+                          cy={cy}
+                          r={4}
+                          fill={chartColor}
+                          stroke="var(--bg)"
+                          strokeWidth={2}
+                        />
+                        <text
+                          x={labelX}
+                          y={labelY}
+                          textAnchor={labelAnchor}
+                          fontSize={11}
+                          fill="var(--text-muted)"
+                          fontWeight={500}
+                        >
+                          {label}
+                        </text>
+                      </g>
+                    )
+                  }}
+                  activeDot={{ r: 4, fill: chartColor }}
                 />
               </LineChart>
             </ResponsiveContainer>
@@ -278,56 +558,103 @@ export default function Dashboard() {
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <span className="chart-title">Benchmark Comparison</span>
-            <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>Manually updated</span>
-          </div>
-          <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
-            <div className="field" style={{ flex: 1 }}>
-              <label style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>S&P 500 — Initial Value</label>
-              <input
-                type="number"
-                value={state.benchmark.initialSP ?? ''}
-                onChange={e => actions.updateBenchmark({ initialSP: parseFloat(e.target.value) || 0 })}
-                placeholder="4700"
-                style={{ fontFamily: 'var(--font-mono)' }}
-              />
-            </div>
-            <div className="field" style={{ flex: 1 }}>
-              <label style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>S&P 500 — Current Value</label>
-              <input
-                type="number"
-                value={state.benchmark.currentSP ?? ''}
-                onChange={e => actions.updateBenchmark({ currentSP: parseFloat(e.target.value) || 0 })}
-                placeholder="5300"
-                style={{ fontFamily: 'var(--font-mono)' }}
-              />
-            </div>
+            <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>vs S&P 500 · Live data</span>
           </div>
 
-          {benchmark ? (
-            <>
-              <div className="bench-row">
-                <span className="bench-label">Your Return</span>
-                <span className={`bench-value ${gainClass(benchmark.portfolioReturnPct)}`}>
-                  {formatPercent(benchmark.portfolioReturnPct)}
-                </span>
-              </div>
-              <div className="bench-row">
-                <span className="bench-label">S&P 500 Return</span>
-                <span className={`bench-value ${gainClass(benchmark.spReturn)}`}>
-                  {formatPercent(benchmark.spReturn)}
-                </span>
-              </div>
-              <div className="bench-row">
-                <span className="bench-label">Alpha (Your − S&P)</span>
-                <span className={`bench-value ${gainClass(benchmark.alpha)}`}>
-                  {formatPercent(benchmark.alpha, true)}
-                </span>
-              </div>
-            </>
-          ) : (
+          {!benchData ? (
             <p style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', padding: '8px 0' }}>
-              Enter S&P 500 values above to compare.
+              Loading benchmark data…
             </p>
+          ) : (
+            <>
+              <ResponsiveContainer width="100%" height={200}>
+                <LineChart data={comparisonChartData} margin={{ top: 4, right: 4, bottom: 4, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis
+                    dataKey="date"
+                    ticks={(() => {
+                      const seen = new Set()
+                      return comparisonChartData
+                        .filter(d => {
+                          const year = d.date.slice(0, 4)
+                          if (seen.has(year)) return false
+                          seen.add(year)
+                          return true
+                        })
+                        .map(d => d.date)
+                    })()}
+                    tickFormatter={dateStr => new Date(dateStr + 'T00:00:00').getFullYear().toString()}
+                    tick={{ fontSize: 10, fill: 'var(--text-muted)' }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tickFormatter={v => v.toFixed(0)}
+                    tick={{ fill: 'var(--text-muted)', fontSize: 10 }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={36}
+                  />
+                  <Tooltip content={<BenchmarkTooltip />} />
+                  <Legend
+                    verticalAlign="top"
+                    align="right"
+                    iconType="plainline"
+                    wrapperStyle={{ fontSize: 11, paddingBottom: 4 }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="portfolio"
+                    name="Your Portfolio"
+                    stroke="var(--green)"
+                    strokeWidth={2}
+                    dot={false}
+                    connectNulls
+                    activeDot={{ r: 3 }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="benchmark"
+                    name="S&P 500"
+                    stroke="var(--blue)"
+                    strokeWidth={2}
+                    dot={false}
+                    connectNulls
+                    activeDot={{ r: 3 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+
+              {(() => {
+                const portLast = benchData.portfolioNormalized.at(-1)?.value ?? 100
+                const benchLast = benchData.benchmarkNormalized.at(-1)?.value ?? 100
+                const portReturn = portLast - 100
+                const spReturn = benchLast - 100
+                const alpha = portReturn - spReturn
+                return (
+                  <div style={{ marginTop: 12 }}>
+                    <div className="bench-row">
+                      <span className="bench-label">Your Return</span>
+                      <span className={`bench-value ${gainClass(portReturn)}`}>
+                        {formatPercent(portReturn)}
+                      </span>
+                    </div>
+                    <div className="bench-row">
+                      <span className="bench-label">S&P 500 Return</span>
+                      <span className={`bench-value ${gainClass(spReturn)}`}>
+                        {formatPercent(spReturn)}
+                      </span>
+                    </div>
+                    <div className="bench-row">
+                      <span className="bench-label">Alpha (Your − S&P)</span>
+                      <span className={`bench-value ${gainClass(alpha)}`}>
+                        {formatPercent(alpha, true)}
+                      </span>
+                    </div>
+                  </div>
+                )
+              })()}
+            </>
           )}
         </div>
 

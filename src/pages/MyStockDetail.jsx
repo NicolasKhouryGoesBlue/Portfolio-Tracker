@@ -12,6 +12,7 @@ import TimeWindowSelector from '../components/TimeWindowSelector'
 import ConfirmDialog from '../components/ConfirmDialog'
 import AddPositionModal from '../components/AddPositionModal'
 import LoadingSpinner from '../components/LoadingSpinner'
+import NewsList from '../components/NewsList'
 import { getWindowStartDate } from '../utils/timeWindows'
 import { SECTOR_COLORS } from '../config'
 import { WINDOW_TO_PERIOD } from '../services/localBackend'
@@ -164,6 +165,16 @@ function DividendsSection({ position }) {
   )
 }
 
+// ─── Period coverage helper (mirrors Dashboard.jsx and localBackend.js) ──────
+const PERIOD_ORDER = ['1d', '5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '5y', '10y', 'max']
+function periodCoversLocal(cachedPeriod, requestedPeriod) {
+  if (!cachedPeriod) return false
+  const ci = PERIOD_ORDER.indexOf(cachedPeriod)
+  const ri = PERIOD_ORDER.indexOf(requestedPeriod)
+  if (ci === -1 || ri === -1) return false
+  return ci >= ri
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function MyStockDetail() {
   const { ticker } = useParams()
@@ -172,6 +183,9 @@ export default function MyStockDetail() {
   const [window, setWindow] = useState('1Y')
   const [showAddLot, setShowAddLot] = useState(false)
   const [deleteLotId, setDeleteLotId] = useState(null)
+  const [news, setNews] = useState([])
+  const [newsLoading, setNewsLoading] = useState(false)
+  const [newsError, setNewsError] = useState(null)
 
   const position = state.positions.find(p => p.ticker === ticker)
   const watchlistEntry = state.watchlist.find(w => w.ticker === ticker)
@@ -181,9 +195,36 @@ export default function MyStockDetail() {
   // that requires a larger dataset than what is currently cached.
   useEffect(() => {
     const period = WINDOW_TO_PERIOD[window] ?? '1y'
-    actions.fetchHistoryForTicker(ticker, false, period)
+    const cachedPeriod = state.priceCache[ticker]?.historyPeriod ?? null
+    if (!periodCoversLocal(cachedPeriod, period)) {
+      actions.fetchHistoryForTicker(ticker, false, period)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ticker, window])
+
+  useEffect(() => {
+    actions.fetchHistoryForTicker(ticker, false, 'max')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticker])
+
+  useEffect(() => {
+    const companyName = (position || watchlistEntry)?.companyName
+    const url = companyName
+      ? `http://localhost:8000/news/${encodeURIComponent(ticker)}?company_name=${encodeURIComponent(companyName)}`
+      : `http://localhost:8000/news/${encodeURIComponent(ticker)}`
+    setNewsLoading(true)
+    setNewsError(null)
+    setNews([])
+    fetch(url)
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json()
+      })
+      .then(data => { setNews(Array.isArray(data.headlines) ? data.headlines : []) })
+      .catch(err => { setNewsError(err.message) })
+      .finally(() => { setNewsLoading(false) })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticker])
 
   if (!position && !watchlistEntry) {
     return (
@@ -221,6 +262,89 @@ export default function MyStockDetail() {
 
   const hasChartData = chartData.length >= 2
 
+  const getTickDates = (data, win) => {
+    if (!data || data.length === 0) return []
+    switch (win) {
+      case 'MAX': {
+        const seen = new Set()
+        return data.filter(d => {
+          const year = parseInt(d.date.slice(0, 4), 10)
+          const bucket = Math.floor(year / 5) * 5
+          if (seen.has(bucket)) return false
+          seen.add(bucket)
+          return true
+        }).map(d => d.date)
+      }
+      case '5Y': {
+        const seen = new Set()
+        return data.filter(d => {
+          const year = d.date.slice(0, 4)
+          const month = parseInt(d.date.slice(5, 7), 10)
+          const key = `${year}-${month <= 6 ? 'A' : 'B'}`
+          if (seen.has(key)) return false
+          seen.add(key)
+          return true
+        }).map(d => d.date)
+      }
+      case '1Y':
+      case 'YTD':
+      case '6M': {
+        const seen = new Set()
+        return data.filter(d => {
+          const key = d.date.slice(0, 7)
+          if (seen.has(key)) return false
+          seen.add(key)
+          return true
+        }).map(d => d.date)
+      }
+      case '3M': {
+        const result = []
+        let lastDate = null
+        for (const d of data) {
+          if (lastDate === null) {
+            result.push(d.date)
+            lastDate = d.date
+          } else {
+            const diff = (new Date(d.date + 'T00:00:00') - new Date(lastDate + 'T00:00:00')) / 86400000
+            if (diff >= 14) {
+              result.push(d.date)
+              lastDate = d.date
+            }
+          }
+        }
+        return result
+      }
+      default:
+        return data.map(d => d.date)
+    }
+  }
+
+  const formatAxisLabel = (dateStr, win) => {
+    if (!dateStr) return ''
+    const date = new Date(dateStr + 'T00:00:00')
+    if (win === 'MAX') {
+      return date.getFullYear().toString()
+    }
+    if (win === '5Y' || win === '1Y') {
+      return date.toLocaleDateString('en-US', { month: 'short' }) + ' ' + date.getFullYear()
+    }
+    if (win === 'YTD' || win === '6M') {
+      return date.toLocaleDateString('en-US', { month: 'short' }) + ' ' + date.getFullYear()
+    }
+    if (win === '3M') {
+      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    }
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  }
+
+  const chartColor = (() => {
+    if (!chartData || chartData.length < 2) return 'var(--green)'
+    const first = chartData[0]?.value
+    const last = chartData[chartData.length - 1]?.value
+    if (first == null || last == null) return 'var(--green)'
+    return last >= first ? 'var(--green)' : 'var(--red)'
+  })()
+
   // Price change direction
   const priceChange = quote?.change ?? null
   const priceChangePct = quote?.changePercent ?? null
@@ -228,6 +352,11 @@ export default function MyStockDetail() {
 
   // Avg cost line for chart
   const avgCost = calc?.avgCostBasis ?? null
+  const maxDataReady = state.priceCache[ticker]?.historyPeriod === 'max'
+
+  // TEMP DEBUG
+  console.log('maxDataReady:', maxDataReady, 'historyPeriod:', state.priceCache[ticker]?.historyPeriod)
+  console.log('chartData length:', chartData.length, 'first date:', chartData[0]?.date, 'last date:', chartData[chartData.length - 1]?.date)
 
   return (
     <div className="page">
@@ -290,7 +419,7 @@ export default function MyStockDetail() {
               {formatGain(calc.unrealizedGain)}
             </span>
             <span className={`m-sub ${gainClass(calc.unrealizedGainPct)}`}>
-              {formatPercent(calc.unrealizedGainPct)}
+              ({formatPercent(calc.unrealizedGainPct)})
             </span>
           </div>
           <div className="metric-card">
@@ -299,7 +428,7 @@ export default function MyStockDetail() {
               {formatGain(calc.totalReturn)}
             </span>
             <span className={`m-sub ${gainClass(calc.totalReturnPct)}`}>
-              {formatPercent(calc.totalReturnPct)}
+              ({formatPercent(calc.totalReturnPct)})
             </span>
           </div>
         </div>
@@ -323,11 +452,12 @@ export default function MyStockDetail() {
             <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
               <XAxis
-                dataKey="label"
+                dataKey="date"
+                ticks={getTickDates(chartData, window)}
+                tickFormatter={(dateStr) => formatAxisLabel(dateStr, window)}
                 tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
                 tickLine={false}
                 axisLine={false}
-                interval="preserveStartEnd"
               />
               <YAxis
                 domain={['auto', 'auto']}
@@ -344,21 +474,94 @@ export default function MyStockDetail() {
                   stroke="var(--yellow)"
                   strokeDasharray="4 4"
                   strokeWidth={1.5}
-                  label={{ value: `Avg ${formatCurrency(avgCost)}`, fill: 'var(--yellow)', fontSize: 11, position: 'right' }}
                 />
               )}
               <Line
                 type="monotone"
                 dataKey="value"
-                stroke={calc
-                  ? (calc.unrealizedGain >= 0 ? 'var(--green)' : 'var(--red)')
-                  : 'var(--blue)'}
+                stroke={chartColor}
                 strokeWidth={2}
-                dot={false}
+                dot={(props) => {
+                  const { cx, cy, index } = props
+                  if (index !== 0 && index !== chartData.length - 1) return null
+
+                  const value = chartData[index]?.value
+                  if (value == null) return null
+
+                  const isFirst = index === 0
+                  const label = `$${value.toFixed(2)}`
+
+                  let slopeUp
+                  if (isFirst) {
+                    const nextValue = chartData[1]?.value
+                    slopeUp = nextValue != null ? nextValue >= value : true
+                  } else {
+                    const prevValue = chartData[chartData.length - 2]?.value
+                    slopeUp = prevValue != null ? value >= prevValue : true
+                  }
+
+                  const CHART_H = 240 // matches ResponsiveContainer height prop
+                  const offset = (window === '5Y' || window === 'MAX') ? 10 : 18
+                  const rightDown = cy + offset
+                  const rightUp = cy - offset
+                  const labelY = isFirst
+                    ? (slopeUp
+                        ? (cy + 16 > CHART_H - 20 ? cy - 16 : cy + 16)
+                        : (cy - 8 < 10 ? cy + 16 : cy - 8))
+                    : (slopeUp
+                        ? (rightDown > CHART_H - 20 ? rightUp : rightDown)
+                        : (rightUp < 10 ? rightDown : rightUp))
+                  const labelAnchor = isFirst ? 'start' : 'end'
+                  const labelX = isFirst ? cx + 6 : cx - 6
+
+                  return (
+                    <g key={`endpoint-${index}`}>
+                      <circle
+                        cx={cx}
+                        cy={cy}
+                        r={4}
+                        fill={chartColor}
+                        stroke="var(--bg)"
+                        strokeWidth={2}
+                      />
+                      <text
+                        x={labelX}
+                        y={labelY}
+                        textAnchor={labelAnchor}
+                        fontSize={11}
+                        fill="var(--text-muted)"
+                        fontWeight={500}
+                      >
+                        {label}
+                      </text>
+                    </g>
+                  )
+                }}
                 activeDot={{ r: 4 }}
               />
             </LineChart>
           </ResponsiveContainer>
+        )}
+        {avgCost != null && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            marginTop: '10px',
+            paddingLeft: '4px',
+            fontSize: '12px',
+            color: 'var(--text-muted)',
+          }}>
+            <svg width="24" height="2" style={{ flexShrink: 0 }}>
+              <line
+                x1="0" y1="1" x2="24" y2="1"
+                stroke="var(--yellow)"
+                strokeWidth="2"
+                strokeDasharray="4 4"
+              />
+            </svg>
+            <span>Avg cost basis <strong style={{ color: 'var(--yellow)' }}>${avgCost.toFixed(2)}</strong></span>
+          </div>
         )}
       </div>
 
@@ -440,6 +643,20 @@ export default function MyStockDetail() {
           <NotesEditor positionId={position.id} initialNotes={position.notes} />
         </div>
       )}
+
+      {/* ── Recent News ──────────────────────────────────────────────────────── */}
+      <div className="card" style={{ marginTop: 16, marginBottom: 16 }}>
+        <div style={{ marginBottom: 10 }}>
+          <span className="chart-title">Recent News</span>
+        </div>
+        {newsLoading ? (
+          <LoadingSpinner label="Loading news…" />
+        ) : newsError ? (
+          <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>{newsError}</p>
+        ) : (
+          <NewsList items={news} />
+        )}
+      </div>
 
       {/* ── Modals ──────────────────────────────────────────────────────────── */}
       {showAddLot && (

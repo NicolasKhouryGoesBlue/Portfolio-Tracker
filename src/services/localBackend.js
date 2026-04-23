@@ -213,6 +213,31 @@ export async function fetchTickerData(ticker, forceRefresh = false, period = '1y
 }
 
 /**
+ * Fetch sector and company name for a ticker from GET /prices/{ticker}.
+ * Returns { sector, company_name } or null on any failure. Never throws.
+ */
+export async function fetchTickerInfo(ticker) {
+  if (!ticker) return null
+  try {
+    const res = await fetch(`${LOCAL_BASE}/prices/${encodeURIComponent(ticker.toUpperCase())}`)
+    if (!res.ok) return null
+    const data = await res.json()
+    return {
+      sector:       data.sector ?? null,
+      company_name: data.company_name ?? null,
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Backward-compatible wrapper — returns sector string only. */
+export async function fetchSector(ticker) {
+  const info = await fetchTickerInfo(ticker)
+  return info?.sector ?? null
+}
+
+/**
  * Read the current cached entry for a ticker (no API call).
  */
 export function getCachedEntry(ticker) {

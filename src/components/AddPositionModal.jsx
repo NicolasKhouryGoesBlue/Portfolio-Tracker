@@ -1,7 +1,46 @@
 import { useState } from 'react'
 import Modal from './Modal'
-import { SECTORS } from '../config'
 import { usePortfolio } from '../store/PortfolioContext'
+import { fetchTickerInfo } from '../services/localBackend'
+
+const GICS_SECTORS = [
+  'Communication Services',
+  'Consumer Discretionary',
+  'Consumer Staples',
+  'Energy',
+  'Financials',
+  'Health Care',
+  'Industrials',
+  'Information Technology',
+  'Materials',
+  'Real Estate',
+  'Utilities',
+]
+
+// Maps yfinance sector strings to official GICS names used in GICS_SECTORS.
+function normalizeSector(raw) {
+  if (!raw) return ''
+  const map = {
+    'Technology':              'Information Technology',
+    'Information Technology':  'Information Technology',
+    'Communication Services':  'Communication Services',
+    'Consumer Cyclical':       'Consumer Discretionary',
+    'Consumer Discretionary':  'Consumer Discretionary',
+    'Consumer Defensive':      'Consumer Staples',
+    'Consumer Staples':        'Consumer Staples',
+    'Healthcare':              'Health Care',
+    'Health Care':             'Health Care',
+    'Financial Services':      'Financials',
+    'Financials':              'Financials',
+    'Industrials':             'Industrials',
+    'Basic Materials':         'Materials',
+    'Materials':               'Materials',
+    'Energy':                  'Energy',
+    'Real Estate':             'Real Estate',
+    'Utilities':               'Utilities',
+  }
+  return map[raw] ?? ''
+}
 
 const today = () => new Date().toISOString().split('T')[0]
 
@@ -12,12 +51,28 @@ export default function AddPositionModal({ onClose, prefill = null }) {
   const [form, setForm] = useState({
     ticker:       prefill?.ticker || '',
     companyName:  prefill?.companyName || '',
-    sector:       prefill?.sector || 'Technology',
+    sector:       prefill?.sector || 'Information Technology',
     date:         today(),
     shares:       '',
     pricePerShare: '',
   })
   const [errors, setErrors] = useState({})
+  const [sectorLoading, setSectorLoading] = useState(false)
+
+  async function handleTickerBlur() {
+    const ticker = form.ticker.trim().toUpperCase()
+    if (!ticker) return
+    setSectorLoading(true)
+    const info = await fetchTickerInfo(ticker)
+    if (info?.sector) {
+      const sector = normalizeSector(info.sector)
+      if (sector) set('sector', sector)
+    }
+    if (info?.company_name) {
+      set('companyName', info.company_name)
+    }
+    setSectorLoading(false)
+  }
 
   function set(field, val) {
     setForm(f => ({ ...f, [field]: val }))
@@ -83,15 +138,16 @@ export default function AddPositionModal({ onClose, prefill = null }) {
           <input
             value={form.ticker}
             onChange={e => set('ticker', e.target.value.toUpperCase())}
+            onBlur={handleTickerBlur}
             placeholder="AAPL"
             style={{ textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}
           />
           {errors.ticker && <span className="field-error">{errors.ticker}</span>}
         </div>
         <div className="field">
-          <label>Sector *</label>
+          <label>Sector * {sectorLoading && <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontSize: 11 }}>loading…</span>}</label>
           <select value={form.sector} onChange={e => set('sector', e.target.value)}>
-            {SECTORS.map(s => <option key={s} value={s}>{s}</option>)}
+            {GICS_SECTORS.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
       </div>

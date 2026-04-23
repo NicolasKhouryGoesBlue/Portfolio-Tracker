@@ -8,6 +8,7 @@ import MyStockDetail from './pages/MyStockDetail'
 import AllPositions from './pages/AllPositions'
 import Watchlist from './pages/Watchlist'
 import Analysis from './pages/Analysis'
+import GeneralNews from './pages/GeneralNews'
 
 export default function App() {
   return (
@@ -23,6 +24,7 @@ export default function App() {
               <Route path="/positions"     element={<AllPositions />} />
               <Route path="/watchlist"     element={<Watchlist />} />
               <Route path="/analysis"      element={<Analysis />} />
+              <Route path="/news"          element={<GeneralNews />} />
               <Route path="*"              element={<Navigate to="/" replace />} />
             </Routes>
           </main>
