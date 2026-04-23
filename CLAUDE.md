@@ -6,7 +6,7 @@ Briefing for every new session. Read this before touching any code.
 
 ## Project purpose
 
-Personal investment portfolio dashboard. Tracks stock positions with multiple purchase lots per position, calculates unrealized gain/loss, logs dividends, shows price history charts, and maintains a watchlist. All portfolio data persists in localStorage. Live prices and history come from a local Python backend that wraps yfinance. AI portfolio analysis is available via an Analysis tab that calls the same backend.
+Personal investment portfolio dashboard. Tracks stock positions with multiple purchase lots per position, calculates unrealized gain/loss, logs dividends, shows price history charts, and maintains a watchlist. All portfolio data persists in localStorage. Live prices and history come from a local Python backend that wraps yfinance. AI portfolio analysis, scenario modeling, conversational chat, and news feeds are all available via backend endpoints and rendered in the Analysis and News tabs.
 
 This is **not** a no-backend app. It has two servers that must both be running.
 
@@ -19,7 +19,7 @@ This is **not** a no-backend app. It has two servers that must both be running.
 | React frontend | Vite 5 + React 18 | 5173 | `Stock-Watchlist-V2/` (this repo) |
 | Python backend | FastAPI + uvicorn | 8000 | `../portfolio-backend/` (sibling directory) |
 
-The frontend never calls any external API directly. All price data, history, and AI analysis flow through `http://localhost:8000`. The frontend service layer (`src/services/localBackend.js`) is the only file that constructs requests to the backend.
+`localBackend.js` is the only file that calls the backend for **price and history data** — it handles caching. All other backend calls (AI analysis, scenario, chat, news) are made directly from their respective page components.
 
 CORS is configured in the backend to allow only `http://localhost:5173`.
 
@@ -31,13 +31,14 @@ CORS is configured in the backend to allow only `http://localhost:5173`.
 |---|---|
 | React 18 | UI framework |
 | Vite 5 | Dev server and build tool |
-| React Router v6 | Tab navigation (`/`, `/stocks`, `/stocks/:ticker`, `/positions`, `/watchlist`, `/analysis`) |
+| React Router v6 | Tab navigation (`/`, `/stocks`, `/stocks/:ticker`, `/positions`, `/watchlist`, `/analysis`, `/news`) |
 | Recharts 2 | All charts — line charts, donut pie chart, sparklines |
 | FastAPI | Python backend HTTP framework |
 | uvicorn | ASGI server that runs FastAPI |
-| yfinance | Source of all stock price and history data |
-| Anthropic Python SDK | AI portfolio analysis (`claude-sonnet-4-6`) |
-| localStorage | Full persistence of portfolio data and API response cache |
+| yfinance | Source of all stock price and history data (including `^GSPC` for benchmark) |
+| Anthropic Python SDK | AI analysis, scenario modeling, chat (`claude-sonnet-4-6`) |
+| Finnhub REST API | News headlines per ticker (last 7 days) |
+| localStorage | Full persistence of portfolio data and price/history cache |
 
 No TypeScript. No CSS framework. Styles are in `src/index.css` using CSS custom properties (dark theme, design tokens).
 
@@ -58,7 +59,7 @@ pip install -r requirements.txt    # only needed once
 uvicorn main:app --reload          # → http://localhost:8000
 ```
 
-The backend requires an `ANTHROPIC_API_KEY` in a `.env` file inside `portfolio-backend/`. Without it, `/analyze` calls will fail but prices and history will still work.
+The backend requires both `ANTHROPIC_API_KEY` and `FINNHUB_API_KEY` in a `.env` file inside `portfolio-backend/`. Without `ANTHROPIC_API_KEY`, `/analyze`, `/scenario`, and `/chat` will fail. Without `FINNHUB_API_KEY`, `/news/{ticker}` will fail. Prices and history work without either key.
 
 The frontend `.env` still contains `VITE_ALPHA_VANTAGE_KEY` — this key is no longer used by any active code. It is safe to ignore.
 
@@ -73,32 +74,34 @@ Stock-Watchlist-V2/           ← React frontend (this repo)
   package.json                ← React 18, react-router-dom, recharts, vite
 
   src/
-    config.js                 ← SECTORS list, SECTOR_COLORS map; also exports API_KEY
-                                 and API_BASE_URL (Alpha Vantage leftovers — not used)
+    config.js                 ← SECTORS list, SECTOR_COLORS map, CACHE_TTL_MS.
+                                 Also exports API_KEY and API_BASE_URL (Alpha Vantage
+                                 leftovers — not imported anywhere active, safe to remove)
     main.jsx                  ← React entry point — mounts App into #root
     App.jsx                   ← BrowserRouter + PortfolioProvider + all route definitions
     index.css                 ← All styles — dark theme tokens, layout, component classes
 
     services/
-      localBackend.js         ← Active backend service — all calls to http://localhost:8000;
-                                 localStorage cache; period coverage logic. See service layer section.
-      alphaVantage.js         ← Dead file — was the old API service; kept for reference,
-                                 not imported anywhere active
+      localBackend.js         ← Price + history only — all calls to http://localhost:8000
+                                 for /prices and /history; localStorage cache; period
+                                 coverage logic. Does NOT handle /analyze, /news, etc.
+      alphaVantage.js         ← Dead file — was the old API service; not imported anywhere
 
     store/
       PortfolioContext.jsx    ← Global state via useReducer; exposes state + actions via
-                                 usePortfolio(). Imports from localBackend.js.
+                                 usePortfolio(). Also holds analysis-tab state (6 fields)
+                                 and exports 3 benchmark helper functions.
       placeholderData.js      ← Seed data injected on first load (AAPL, GOOGL, MSFT)
 
     utils/
       calculations.js         ← Pure math: calcPosition, calcPortfolioSummary,
-                                 buildPortfolioHistory, calcBenchmarkComparison, etc.
+                                 buildPortfolioHistory, calcBenchmarkComparison (unused), etc.
       formatters.js           ← Currency, percent, gain, date, formatDateTime + gainClass
       timeWindows.js          ← TIME_WINDOWS array + getWindowStartDate(key) → YYYY-MM-DD
 
     components/
       NavBar.jsx              ← Sticky top nav — Dashboard, My Stocks, All Positions,
-                                 Watchlist, Analysis tabs; active state via useLocation
+                                 Watchlist, Analysis, News tabs; active state via useLocation
       Footer.jsx              ← Disclaimer footer — "Stock prices provided by Yahoo Finance."
       Modal.jsx               ← Reusable modal (Escape + backdrop click to close)
       ConfirmDialog.jsx       ← Delete confirmation built on Modal
@@ -107,26 +110,42 @@ Stock-Watchlist-V2/           ← React frontend (this repo)
       TimeWindowSelector.jsx  ← Button group for 1D/1W/MTD/1M/3M/6M/YTD/1Y/5Y/MAX
       AddPositionModal.jsx    ← Add new position or add a lot to an existing one
       AddWatchlistModal.jsx   ← Add or edit a watchlist entry
+      NewsList.jsx            ← Pure presentational component — renders a list of
+                                 {headline, source, url} items. Used by Analysis,
+                                 MyStockDetail, and GeneralNews.
 
     pages/
       Dashboard.jsx           ← Portfolio overview: summary metrics, value-over-time chart
                                  (with time window), sector donut, portfolio weights.
+                                 Benchmark Comparison card shows dual-line normalized chart
+                                 (portfolio vs S&P 500) — data from ^GSPC history in cache.
                                  Silently auto-refreshes prices every 60 seconds.
-                                 Fetches 1y history on mount; fetches longer periods when
-                                 user selects a window not covered by cache.
       MyStocks.jsx            ← Card grid of all positions with sparklines
-      MyStockDetail.jsx       ← /stocks/:ticker — price chart, lots table, dividends, notes.
-                                 Re-fetches history on ticker change or window change.
+      MyStockDetail.jsx       ← /stocks/:ticker — price chart, lots table, dividends, notes,
+                                 news headlines. Re-fetches history on ticker/window change.
       AllPositions.jsx        ← Sortable list + grid toggle; Add Position; delete positions
       Watchlist.jsx           ← Table with target price gap; Buy (convert), Edit, Delete
-      Analysis.jsx            ← POSTs holdings to /analyze; renders AI analysis response
+      Analysis.jsx            ← AI analysis (POST /analyze), scenario tool (POST /scenario),
+                                 conversational chat (POST /chat), and news per position.
+                                 Shows 3 bullet conclusions + toggle to reveal full analysis.
+      GeneralNews.jsx         ← /news — fetches headlines for all positions in parallel
+                                 via GET /news/{ticker}; renders one card per position.
 
 ../portfolio-backend/         ← Python backend (sibling directory, NOT inside this repo)
-  .env                        ← ANTHROPIC_API_KEY
-  requirements.txt            ← fastapi, uvicorn, yfinance, anthropic, python-dotenv, etc.
-  main.py                     ← FastAPI app with CORS, three endpoints: /prices, /history, /analyze
-  data_fetcher.py             ← get_portfolio_data() — fetches price + 1y history per ticker
-  analyzer.py                 ← analyze_portfolio() — builds prompt, calls Anthropic API
+  .env                        ← ANTHROPIC_API_KEY, FINNHUB_API_KEY
+  requirements.txt            ← fastapi, uvicorn, yfinance, anthropic, python-dotenv,
+                                 requests (for Finnhub), etc.
+  main.py                     ← FastAPI app with CORS; 6 endpoints: GET /prices/{ticker},
+                                 GET /history/{ticker}, GET /news/{ticker},
+                                 POST /analyze, POST /scenario, POST /chat
+  data_fetcher.py             ← get_portfolio_data() — fetches price + fundamental data per ticker
+  analyzer.py                 ← analyze_portfolio() — builds structured prompt, calls claude-sonnet-4-6
+  news_fetcher.py             ← get_news_for_ticker() — calls Finnhub /company-news for last 7 days;
+                                 returns up to 5 {headline, source, url} dicts
+  chat_engine.py              ← run_chat() — portfolio-aware conversational assistant;
+                                 passes conversation_history to claude-sonnet-4-6
+  scenario_engine.py          ← run_scenario() — extracts market move %, applies sector betas,
+                                 calls claude-sonnet-4-6 for narrative; returns impact per position
 ```
 
 ---
@@ -136,27 +155,42 @@ Stock-Watchlist-V2/           ← React frontend (this repo)
 **`GET /prices/{ticker}`**
 - Calls `yf.Ticker(ticker).info`
 - Returns: `{ ticker, current_price, company_name, sector, market_cap, pe_ratio }`
-- Frontend reads: `current_price` only (rest not currently displayed)
 
 **`GET /history/{ticker}?period={period}`**
 - Valid periods: `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`, `5y`, `max`
 - Calls `stock.history(period=period, interval="1d")`
 - Returns: `{ ticker, period, history: [{date: "YYYY-MM-DD", close: float}] }`
 - Frontend converts to `{ "YYYY-MM-DD": number }` dict in `localBackend.js`
+- Also used for `^GSPC` (sent as `%5EGSPC`) to power the benchmark chart
+
+**`GET /news/{ticker}`**
+- Calls Finnhub `/company-news` for the last 7 days; requires `FINNHUB_API_KEY`
+- Returns: `{ ticker, news: [{headline, source, url}] }` (up to 5 items)
+- Called directly from `Analysis.jsx` and `GeneralNews.jsx` (not through `localBackend.js`)
 
 **`POST /analyze`**
 - Body: `{ tickers: string[], holdings: { [ticker]: { quantity, cost_basis } } }`
-- Calls `data_fetcher.get_portfolio_data()` to fetch live prices, then `analyzer.analyze_portfolio()`
-- `analyzer.py` builds a prompt with portfolio metrics and calls `claude-sonnet-4-6` via Anthropic SDK
+- Calls `data_fetcher.get_portfolio_data()` then `analyzer.analyze_portfolio()`
+- Response format contract: 3 `•` bullet conclusions, then `---FULL ANALYSIS---` divider on its own line, then full analysis body
 - Returns: `{ analysis: string, status: "success" | "error" }`
+
+**`POST /scenario`**
+- Body: `{ scenario: string, holdings: {...}, market_data: {...} }`
+- Extracts market move % from scenario string, applies sector-weighted betas, calls claude-sonnet-4-6
+- Returns: `{ scenario, market_move_pct, total_impact_usd, positions[], analysis, status }`
+
+**`POST /chat`**
+- Body: `{ message: string, conversation_history: [{role, content}], holdings: {...}, market_data: {...} }`
+- Passes full conversation history + portfolio context to claude-sonnet-4-6; max_tokens=1024
+- Returns: `{ response: string, status: "success" | "error" }`
 
 ---
 
 ## Service layer — localBackend.js
 
-This file is the only place the backend URL (`http://localhost:8000`) appears. It replaces the old `alphaVantage.js` entirely and exports the same interface.
+This file handles **price and history fetching only**. It is the only place the backend URL (`http://localhost:8000`) appears for price/history calls. AI, scenario, chat, and news calls are made directly from page components.
 
-**Cache:** Uses `av_price_cache` localStorage key (same key as the old Alpha Vantage service — preserves any existing cached data). TTL is 24 hours (`CACHE_TTL_MS` from `config.js`). Quote and history have separate timestamps (`timestamp` and `historyTimestamp`) so a quote refresh doesn't invalidate history.
+**Cache:** Uses `av_price_cache` localStorage key. TTL is 24 hours (`CACHE_TTL_MS` from `config.js`). Quote and history have separate timestamps (`timestamp` and `historyTimestamp`) so a quote refresh doesn't invalidate history.
 
 **Period coverage logic:**
 ```
@@ -169,8 +203,8 @@ If `5y` is cached, any shorter period request returns from cache without a netwo
 
 **Exports:**
 - `fetchQuote(ticker, forceRefresh)` — GET /prices/{ticker}, caches quote
-- `fetchHistory(ticker, forceRefresh, period)` — GET /history/{ticker}?period=..., caches history
-- `fetchTickerData(ticker, forceRefresh, period)` — both quote + history (used for forced refresh)
+- `fetchHistory(ticker, forceRefresh, period)` — GET /history/{ticker}?period=..., caches history; uses `encodeURIComponent(ticker)` so `^GSPC` is sent correctly
+- `fetchTickerData(ticker, forceRefresh, period)` — both quote + history
 - `getCachedEntry(ticker)` — reads current cache entry without fetching
 - `seedCacheEntry(ticker, quote, history)` — injects placeholder data at timestamp=0
 - `getLastUpdatedTimestamp()` — max quote timestamp across all cached tickers
@@ -185,7 +219,7 @@ If `5y` is cached, any shorter period request returns from cache without a netwo
 ## Data flow
 
 1. **App mounts** → `PortfolioProvider` calls `buildInitialState()`:
-   - Reads `pf_positions`, `pf_watchlist`, `pf_benchmark` from localStorage
+   - Reads `pf_positions`, `pf_watchlist` from localStorage
    - If `pf_positions` is null (first ever load), seeds placeholder data (AAPL, GOOGL, MSFT)
    - Reads `av_price_cache` into `state.priceCache`
 
@@ -196,20 +230,31 @@ If `5y` is cached, any shorter period request returns from cache without a netwo
 
 3. **Dashboard fetches history lazily**:
    - On mount: calls `actions.fetchHistoryForPositions(false)` with default `period='1y'`
-   - On window change: checks cache coverage via local `periodCoversLocal()` mirror; only
-     re-fetches if the new period isn't covered by `state.priceCache[ticker].historyPeriod`
+   - `fetchHistoryForPositions` also fetches `^GSPC` history with `period='max'` after all position fetches complete (non-fatal try/catch)
+   - On window change: checks cache coverage via local `periodCoversLocal()` mirror; only re-fetches if the new period isn't covered
    - Dashboard auto-refreshes quotes every 60 seconds via `setInterval`
 
-4. **MyStockDetail fetches history on load**:
+4. **Benchmark chart** in Dashboard:
+   - `computeBenchmarkData(state)` aligns `buildPortfolioHistory` output with `^GSPC` history, normalizes both to 100 at the earliest purchase date
+   - Two-pointer merge produces `{date, portfolio, benchmark}[]` for the dual-line chart
+
+5. **MyStockDetail fetches history on load**:
    - Re-fetches on `[ticker, window]` changes using `WINDOW_TO_PERIOD[window]`
    - Does not apply the coverage check — always asks for the selected period
 
-5. **UI reads derived data**:
-   - Pure functions in `calculations.js` take `state.positions` and `state.priceCache` as inputs
-   - `buildPortfolioHistory` constructs portfolio value-over-time from cached history;
-     `findPriceBefore` fills non-trading days by scanning for the nearest prior date
+6. **News flow**:
+   - `GeneralNews.jsx`: on mount, fires one `GET /news/{ticker}` per position via `Promise.allSettled`; fulfilled results stored in local state; rejected silently skipped
+   - `Analysis.jsx`: fetches news per position as part of the analysis display; results stored in `analysisNewsData` context field
 
-6. **User mutations** dispatch actions → `useEffect` hooks persist to localStorage immediately
+7. **Analysis, scenario, chat**:
+   - All three POST directly to their backend endpoints from `Analysis.jsx`
+   - Results stored in context (`analysisResult`, `scenarioResult`, `chatMessages`) so they survive tab navigation
+
+8. **UI reads derived data**:
+   - Pure functions in `calculations.js` take `state.positions` and `state.priceCache` as inputs
+   - `buildPortfolioHistory` constructs portfolio value-over-time; `findPriceBefore` fills non-trading days
+
+9. **User mutations** dispatch actions → `useEffect` hooks persist to localStorage immediately
 
 ---
 
@@ -219,10 +264,10 @@ If `5y` is cached, any shorter period request returns from cache without a netwo
 |---|---|---|
 | `pf_positions` | Array of position objects (ticker, companyName, sector, lots[], dividends[], notes) | Permanent until user clears browser data |
 | `pf_watchlist` | Array of watchlist entries (ticker, companyName, sector, targetBuyPrice, reason) | Permanent |
-| `pf_benchmark` | `{ initialSP, currentSP }` for S&P 500 comparison | Permanent |
-| `av_price_cache` | `{ [ticker]: { quote, history, historyPeriod, timestamp, historyTimestamp } }` | Survives reloads; entries expire after 24h TTL |
+| `pf_benchmark` | `{ initialSP, currentSP }` — **legacy**, no longer written or read by active UI | Survives reloads but ignored |
+| `av_price_cache` | `{ [ticker]: { quote, history, historyPeriod, timestamp, historyTimestamp } }` — includes `^GSPC` | Survives reloads; entries expire after 24h TTL |
 
-**Critical:** `localStorage.clear()` destroys the entire portfolio. The only persistent source of truth for holdings is `pf_positions` in localStorage. `placeholderData.js` is only used for first-load seeding — it does not restore data after clearing.
+**Critical:** `localStorage.clear()` destroys the entire portfolio. The only persistent source of truth for holdings is `pf_positions` in localStorage.
 
 `av_api_usage` (old Alpha Vantage call counter) is no longer read or written.
 
@@ -236,12 +281,12 @@ All global state lives in `PortfolioContext` via `useReducer`. Access it anywher
 const { state, actions } = usePortfolio()
 ```
 
-**State shape:**
+**Reducer state shape:**
 ```js
 {
   positions: [],               // array of position objects
   watchlist: [],               // array of watchlist entries
-  benchmark: {},               // { initialSP, currentSP }
+  benchmark: {},               // legacy { initialSP, currentSP } — no longer used by UI
   priceCache: {},              // { [ticker]: { quote, history, historyPeriod, timestamp, historyTimestamp } }
   loadingTickers: Set,         // tickers currently fetching a quote
   historyLoadingTickers: Set,  // tickers currently fetching history
@@ -251,6 +296,19 @@ const { state, actions } = usePortfolio()
   lastUpdated: null,           // timestamp of most recent quote fetch
 }
 ```
+
+**Analysis-tab context state** (held as `useState` inside `PortfolioProvider`, not in the reducer — survives tab navigation, resets on hard refresh, not persisted to localStorage):
+- `analysisResult` / `setAnalysisResult` — raw string from `/analyze`
+- `analysisNewsData` / `setAnalysisNewsData` — `{ [ticker]: [{headline, source, url}] }`
+- `scenarioResult` / `setScenarioResult` — object from `/scenario`
+- `scenarioInput` / `setScenarioInput` — current scenario text input
+- `chatMessages` / `setChatMessages` — `[{role, content}]` conversation history
+- `showFullAnalysis` / `setShowFullAnalysis` — toggle for full analysis body vs bullets-only view
+
+**Benchmark helper exports** (module-scope functions exported from `PortfolioContext.jsx`):
+- `getEarliestPurchaseDate(positions)` → `"YYYY-MM-DD"` | `null`
+- `normalizeSeries(series, anchorDate)` → `[{date, value}]` indexed to 100 at anchor
+- `computeBenchmarkData(state)` → `{ anchorDate, portfolioNormalized, benchmarkNormalized }` | `null`
 
 **Key actions:** `addPosition`, `addLot`, `removeLot`, `addDividend`, `removeDividend`, `updateNotes`, `addWatchlistEntry`, `updateWatchlistEntry`, `removeWatchlistEntry`, `convertWatchlistToPosition`, `updateBenchmark`, `refreshPrices(force)`, `fetchHistoryForPositions(force, period)`, `fetchHistoryForTicker(ticker, force, period)`.
 
@@ -275,11 +333,7 @@ Current seed holdings:
 
 **X-axis label readability on long-range charts.** On 5Y and MAX views, the x-axis tick labels overlap and become unreadable. Recharts' `interval="preserveStartEnd"` is not sufficient at this scale. Needs a custom tick formatter that reduces label density based on date range.
 
-**Benchmark Comparison uses manual inputs.** The Dashboard's Benchmark section requires the user to manually enter S&P 500 initial and current values. These should eventually be fetched from the backend via a `GET /history/^GSPC` call and populated automatically.
-
-**`config.js` contains dead Alpha Vantage exports.** `API_KEY` and `API_BASE_URL` are still exported from `config.js` but not imported anywhere active. They can be removed if a config cleanup task comes up.
-
-**`apiWarning` message in PortfolioContext still says "Alpha Vantage rate limit."** Line 315 in `PortfolioContext.jsx` dispatches a SET_API_WARNING with text referencing Alpha Vantage. The local backend never returns `rateLimited: true`, so this code path never fires — but it should be updated if the warning logic is ever activated.
+**`apiWarning` message in PortfolioContext still says "Alpha Vantage rate limit."** The local backend never returns `rateLimited: true`, so this code path never fires — but the string should be updated if the warning logic is ever activated.
 
 ---
 
@@ -296,3 +350,9 @@ Current seed holdings:
 **Dashboard time window buttons do not cover all yfinance periods.** `DASH_PERIOD_MAP` maps YTD → `'1y'` (not `'ytd'`) because the backend's valid period list does not include `'ytd'`. This means the YTD chart may show slightly more data than strictly year-to-date.
 
 **History fetch guard (`historyFetchingRef`).** Only one `fetchHistoryForPositions` call can run at a time. A second call while the first is in progress is dropped silently.
+
+**`---FULL ANALYSIS---` is a model contract.** `Analysis.jsx` splits the `/analyze` response on this exact literal string to separate the 3-bullet summary from the full analysis body. If `analyzer.py`'s prompt is changed in a way that causes the model to omit or alter this divider, the toggle UI will break (it falls back to showing the full text unsplit).
+
+**`calcBenchmarkComparison` in `calculations.js` is now unused.** The benchmark chart was migrated to `computeBenchmarkData` in `PortfolioContext.jsx`. The function remains in `calculations.js` but is not imported anywhere active.
+
+**Analysis-tab state is not persisted to localStorage.** `analysisResult`, `chatMessages`, and all other analysis-tab context fields reset on hard refresh. This is intentional — stale AI responses are not useful across sessions.
